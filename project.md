@@ -486,6 +486,7 @@ Mobile-first, works in the HA companion app and desktop browsers. Navigation bar
 | `POST api/recipes/<id>/archive`, `…/restore` | archive / restore | M2 |
 | `GET/POST api/tags`, `PUT/DELETE api/tags/<id>` | tag editor (delete removes the tag from recipes) | M2 |
 | `GET api/ingredient-names` | known names, sorted case-insensitively | M2 |
+| `GET api/units` | canonical units with plural forms `[{unit, plural}]` for the edit form and amount display (added in M2) | M2 |
 | `POST api/parse-ingredients` | `{text}` → parsed ingredient list | M2 |
 | `GET images/<sha256>.<ext>` | stored image, `Cache-Control: max-age=31536000, immutable` | M3 |
 | `POST api/imports` | `{url}` or `{urls: […]}` (M3), `{text}` ≤ 20000 chars (M4) → job ids | M3 |
@@ -628,13 +629,13 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 - [ ] The sidebar panel greets the logged-in HA user by display name; a second HA account sees its own name (manual, HA).
 - [ ] The app is not reachable from the LAN directly (manual, HA).
 - [ ] Settings dropdowns list real `todo` and `ai_task` entities; choices persist across app restarts (manual, HA).
-- [ ] Language switch changes the UI immediately and persists per user (manual).
+- [x] Language switch changes the UI immediately and persists per user (manual).
 - [ ] Systemcheck `ha` shows the HA version; app local time equals HA local time (manual, HA).
 - [ ] Systemcheck `bring`: the test item appears in and disappears from the Bring! phone app; V3/V4/V5 filled in §5 (manual, phone).
 - [ ] Systemcheck `ai`: at least one variant returns parseable data; V6 filled in §5 (manual, HA).
 - [ ] Systemcheck `sensor`: `sensor.essensplan` visible in Developer Tools → States; V7 filled (manual, HA).
 - [ ] The app appears in a new HA backup (manual, HA).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M2 – Recipes and German ingredient parser
 
@@ -651,9 +652,9 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 
 **Acceptance**
 - [ ] A recipe entered on the phone by pasting 10 ingredient lines from a Chefkoch page: ≥ 9 of 10 lines parsed correctly without edits (manual, phone).
-- [ ] Changing portions on the recipe page scales the amounts (manual).
-- [ ] Archive and restore work; archived recipes are hidden from the list (manual).
-- [ ] All tests pass.
+- [x] Changing portions on the recipe page scales the amounts (manual).
+- [x] Archive and restore work; archived recipes are hidden from the list (manual).
+- [x] All tests pass.
 
 ### M3 – Web import and draft queue
 
@@ -669,11 +670,11 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 - `test_worker.py`: job transitions `queued → running → review/failed` with a stubbed `build_draft`; `running` reset on start.
 
 **Acceptance**
-- [ ] 5 real Chefkoch links and 3 links from other German recipe sites (e.g. lecker.de, eatsmarter.de, kitchenstories.com) each give a draft with title, image, servings, steps and ≥ 90 % correctly parsed ingredients (manual). If a site blocks the User-Agent, report it and ask.
-- [ ] Bulk paste of 10 links creates 10 jobs, processed one after another; the page updates without reload (manual).
-- [ ] Importing the same link twice shows the "already imported" warning (manual).
-- [ ] `http://192.168.0.1/` is rejected with a clear message (manual).
-- [ ] All tests pass.
+- [ ] 5 real Chefkoch links and 3 links from other German recipe sites (e.g. lecker.de, eatsmarter.de, kitchenstories.com) each give a draft with title, image, servings, steps and ≥ 90 % correctly parsed ingredients (manual). If a site blocks the User-Agent, report it and ask. *Still open: only 1 Chefkoch and 1 EatSmarter link tried so far (both fine; neither site blocked the User-Agent).*
+- [ ] Bulk paste of 10 links creates 10 jobs, processed one after another; the page updates without reload (manual). *Still open: tried with 3 links and a single link, the page updated without reload.*
+- [x] Importing the same link twice shows the "already imported" warning (manual).
+- [x] `http://192.168.0.1/` is rejected with a clear message (manual).
+- [x] All tests pass.
 
 ### M4 – AI enrichment and video links
 

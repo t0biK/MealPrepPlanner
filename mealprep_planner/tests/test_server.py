@@ -1,10 +1,11 @@
 import http.client
 import json
+import tempfile
 import threading
 import unittest
 from pathlib import Path
 
-from mealprep import VERSION, server
+from mealprep import VERSION, db, server
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
@@ -19,7 +20,8 @@ def headers(**kw):
 class DevServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.httpd = server.make_server("127.0.0.1", 0, STATIC)
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.httpd = server.make_server("127.0.0.1", 0, STATIC, cls.tmp.name)
         cls.port = cls.httpd.server_address[1]
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
 
@@ -27,6 +29,177 @@ class DevServerTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.httpd.shutdown()
         cls.httpd.server_close()
+        cls.tmp.cleanup()
+
+    def send(self, method, path, body=b"{}", ctype="application/json", length=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.putrequest(method, path)
+        c.putheader("Content-Type", ctype)
+        c.putheader("Content-Length", str(len(body) if length is None else length))
+        c.endheaders(body)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r, data
+
+    def test_non_json_write_is_415(self):
+        r, body = self.send("PUT", "/api/me", b"lang=de", "text/plain")
+        self.assertEqual(r.status, 415)
+        self.assertEqual(json.loads(body)["error"], "unsupported_media_type")
+
+    def test_oversized_write_is_413(self):
+        r, body = self.send("PUT", "/api/me", b"{}", length=1024 * 1024 + 1)
+        self.assertEqual(r.status, 413)
+        self.assertEqual(json.loads(body)["error"], "too_large")
+
+    def test_put_me_accepts_only_de_en_null(self):
+        for lang in ("de", "en", None):
+            r, body = self.send("PUT", "/api/me", json.dumps({"lang": lang}).encode())
+            self.assertEqual((r.status, json.loads(body)["lang"]), (200, lang))
+        for bad in ("fr", 1, ""):
+            r, body = self.send("PUT", "/api/me", json.dumps({"lang": bad}).encode())
+            self.assertEqual(r.status, 400)
+            self.assertEqual(json.loads(body), {"error": "invalid_field", "field": "lang"})
+
+    def test_settings_roundtrip_and_validation(self):
+        r, body = self.send("PUT", "/api/settings", b'{"ai_enabled": false}')
+        self.assertEqual(json.loads(body)["ai_enabled"], False)
+        r, body = self.send("PUT", "/api/settings", b'{"ai_enabled": "yes"}')
+        self.assertEqual((r.status, json.loads(body)["field"]), (400, "ai_enabled"))
+        r, body = self.get("/api/settings")
+        self.assertEqual(json.loads(body)["ai_enabled"], False)
+
+    def call(self, method, path, obj=None):
+        if method == "GET":
+            r, body = self.get(path)
+        else:
+            r, body = self.send(method, path, json.dumps(obj if obj is not None else {}).encode())
+        return r.status, json.loads(body)
+
+    def test_default_portions_setting(self):
+        self.assertEqual(self.call("PUT", "/api/settings", {"default_portions": 4})[1]["default_portions"], 4)
+        for bad in (0, 13, "2", True, 2.5):
+            self.assertEqual(self.call("PUT", "/api/settings", {"default_portions": bad})[0], 400)
+        self.call("PUT", "/api/settings", {"default_portions": 2})
+
+    def test_recipe_lifecycle(self):
+        draft = {"format_version": 1, "title": "API Suppe", "servings": 2, "tags": ["suppe"],
+                 "ingredients": [{"amount": 2, "unit": "Dose", "name": "Tomaten"}], "steps": ["Kochen."]}
+        status, created = self.call("POST", "/api/recipes", draft)
+        self.assertEqual(status, 201)
+        rid = created["id"]
+        self.assertEqual(created["tags"], ["Suppe"])
+        self.assertEqual(self.call("GET", f"/api/recipes/{rid}")[1]["ingredients"][0]["unit"], "Dose")
+
+        status, updated = self.call("PUT", f"/api/recipes/{rid}", {**draft, "title": "API Suppe 2"})
+        self.assertEqual((status, updated["title"]), (200, "API Suppe 2"))
+
+        self.assertEqual(self.call("POST", f"/api/recipes/{rid}/archive")[1]["archived"], True)
+        listed = lambda arch: [r["id"] for r in self.call("GET", f"/api/recipes?archived={arch}")[1]]
+        self.assertEqual((rid in listed(0), rid in listed(1)), (False, True))
+        self.assertEqual(self.call("POST", f"/api/recipes/{rid}/restore")[1]["archived"], False)
+        self.assertEqual(self.call("GET", "/api/recipes?q=tomaten&tag=Suppe")[1][0]["id"], rid)
+        self.assertIn("Tomaten", self.call("GET", "/api/ingredient-names")[1])
+
+    def test_recipe_errors(self):
+        self.assertEqual(self.call("POST", "/api/recipes", {"format_version": 1, "title": "", "servings": 2})[1],
+                         {"error": "invalid_field", "field": "title"})
+        self.assertEqual(self.call("GET", "/api/recipes/999999")[0], 404)
+        self.assertEqual(self.call("PUT", "/api/recipes/999999", {"format_version": 1, "title": "x", "servings": 1})[0], 404)
+        self.assertEqual(self.call("POST", "/api/recipes/999999/archive")[0], 404)
+        self.assertEqual(self.call("GET", "/api/recipes?archived=x")[1]["field"], "archived")
+        # a draft may not reference an image that is not stored
+        bad = {"format_version": 1, "title": "x", "servings": 1, "image": "a" * 64 + ".jpg"}
+        self.assertEqual(self.call("POST", "/api/recipes", bad)[1]["field"], "image")
+
+    def test_tag_crud(self):
+        status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})
+        self.assertEqual(status, 201)
+        self.assertEqual(self.call("POST", "/api/tags", {"name": "servertag"})[1]["field"], "name")
+        self.assertEqual(self.call("PUT", f"/api/tags/{tag['id']}", {"name": "Renamed"})[1]["name"], "Renamed")
+        self.assertIn("Renamed", [t["name"] for t in self.call("GET", "/api/tags")[1]])
+        self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 200)
+        self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 404)
+        self.assertEqual(self.call("PUT", "/api/tags/999999", {"name": "x"})[0], 404)
+
+    def test_parse_ingredients_and_units(self):
+        status, parsed = self.call("POST", "/api/parse-ingredients", {"text": "500 g Mehl\n2 Eier"})
+        self.assertEqual((status, [p["name"] for p in parsed]), (200, ["Mehl", "Eier"]))
+        self.assertEqual(self.call("POST", "/api/parse-ingredients", {"text": 5})[1]["field"], "text")
+        units = self.call("GET", "/api/units")[1]
+        self.assertIn({"unit": "Dose", "plural": "Dosen"}, units)
+
+    def make_job(self, status, draft=None):
+        conn = db.connect(self.tmp.name)
+        with conn:
+            job_id = conn.execute(
+                "INSERT INTO import_jobs (url, origin, status, draft, created_at, updated_at) "
+                "VALUES ('https://example.com/x', 'single', ?, ?, 'now', 'now')",
+                (status, json.dumps(draft) if draft else None)).lastrowid
+        conn.close()
+        return job_id
+
+    def test_create_imports_validates_and_queues(self):
+        status, body = self.call("POST", "/api/imports", {"url": " https://example.com/a "})
+        self.assertEqual((status, len(body["ids"])), (201, 1))
+        job = self.call("GET", f"/api/imports/{body['ids'][0]}")[1]
+        self.assertEqual((job["url"], job["origin"], job["status"], job["draft"]), ("https://example.com/a", "single", "queued", None))
+        for bad in ({}, {"url": "ftp://example.com/"}, {"url": 5}, {"url": "javascript:alert(1)"}):
+            self.assertEqual(self.call("POST", "/api/imports", bad), (400, {"error": "invalid_field", "field": "url"}))
+
+        status, body = self.call("POST", "/api/imports", {"urls": [
+            "https://example.com/1", "bad", 5, "https://example.com/1", "http://example.com/2"]})
+        self.assertEqual((status, len(body["ids"])), (201, 2))  # junk dropped, duplicates merged
+        origin = self.call("GET", f"/api/imports/{body['ids'][0]}")[1]["origin"]
+        self.assertEqual(origin, "bulk")
+        for bad in ({"urls": []}, {"urls": ["nope"]}, {"urls": "x"},
+                    {"urls": [f"https://example.com/{i}" for i in range(51)]}):
+            self.assertEqual(self.call("POST", "/api/imports", bad)[1]["field"], "urls")
+
+    def test_import_list_filter_and_404(self):
+        job_id = self.make_job("failed")
+        ids = [j["id"] for j in self.call("GET", "/api/imports?status=failed")[1]]
+        self.assertIn(job_id, ids)
+        self.assertEqual(ids, sorted(ids, reverse=True))
+        self.assertNotIn(job_id, [j["id"] for j in self.call("GET", "/api/imports?status=queued,review")[1]])
+        self.assertEqual(self.call("GET", "/api/imports?status=bogus")[1]["field"], "status")
+        self.assertEqual(self.call("GET", "/api/imports/999999")[0], 404)
+        self.assertEqual(self.call("POST", "/api/imports/999999/save", {})[0], 404)
+
+    def test_import_retry_and_discard(self):
+        job_id = self.make_job("failed")
+        self.assertEqual(self.call("POST", f"/api/imports/{job_id}/retry")[1]["status"], "queued")
+        self.assertEqual(self.call("POST", f"/api/imports/{job_id}/retry")[0], 400)  # queued jobs cannot be retried
+        self.assertEqual(self.call("POST", f"/api/imports/{job_id}/discard")[1]["status"], "discarded")
+        self.assertEqual(self.call("POST", f"/api/imports/{job_id}/discard")[0], 400)
+
+    def test_import_save_creates_recipe_once(self):
+        draft = {"format_version": 1, "title": "Importiert", "servings": 3, "source_kind": "web",
+                 "source_url": "https://example.com/x", "image_url": "https://example.com/i.jpg", "warnings": ["image_failed"]}
+        job_id = self.make_job("review", draft)
+        self.assertEqual(self.call("POST", f"/api/imports/{job_id}/save", {**draft, "title": ""})[1]["field"], "title")
+        status, recipe = self.call("POST", f"/api/imports/{job_id}/save", {**draft, "title": "Geprüft"})
+        self.assertEqual((status, recipe["title"], recipe["source_kind"]), (201, "Geprüft", "web"))
+        job = self.call("GET", f"/api/imports/{job_id}")[1]
+        self.assertEqual((job["status"], job["recipe_id"]), ("done", recipe["id"]))
+        self.assertEqual(self.call("POST", f"/api/imports/{job_id}/save", draft)[0], 400)  # already saved
+        self.assertEqual(self.call("POST", f"/api/imports/{self.make_job('queued')}/save", draft)[0], 400)
+
+    def test_images_are_served_only_for_valid_names(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 10
+        name = "ab" * 32 + ".png"
+        (Path(self.tmp.name) / "images").mkdir(exist_ok=True)
+        (Path(self.tmp.name) / "images" / name).write_bytes(png)
+        r, body = self.get("/images/" + name)
+        self.assertEqual((r.status, body, r.getheader("Content-Type")), (200, png, "image/png"))
+        self.assertIn("immutable", r.getheader("Cache-Control"))
+        for bad in ("/images/" + "cd" * 32 + ".png", "/images/../mealprep.db", "/images/abc.png", "/images/" + "AB" * 32 + ".png",
+                    "/images/" + "ab" * 32 + ".gif"):
+            self.assertEqual(self.get(bad)[0].status, 404, bad)
+
+    def test_entities_requires_valid_domain(self):
+        r, body = self.get("/api/ha/entities?domain=light")
+        self.assertEqual((r.status, json.loads(body)["field"]), (400, "domain"))
 
     def get(self, path):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
