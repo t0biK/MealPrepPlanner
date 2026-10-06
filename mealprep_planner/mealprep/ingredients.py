@@ -1,3 +1,4 @@
+import math
 import re
 
 # canonical unit -> (plural, aliases); lookup is case-insensitive with an optional trailing dot
@@ -133,3 +134,58 @@ def fmt_amount(amount, unit):
     if unit is None:
         return number
     return f"{number} {UNITS[unit][0] if amount > 1 else unit}"
+
+
+# ---- shopping list (M8) ----
+
+MASS = {"g": 1, "kg": 1000}
+VOLUME = {"ml": 1, "cl": 10, "dl": 100, "l": 1000}
+SPOONS = {"EL", "TL", "Msp.", "Prise", "Spritzer", "Schuss", "Handvoll", "Tasse"}  # summed per unit, 1 decimal
+
+
+def unit_key(unit):
+    """What amounts are summed in: 'g' (g, kg), 'ml' (ml, cl, dl, l), the canonical unit, '' without a unit."""
+    if unit in MASS:
+        return "g"
+    if unit in VOLUME:
+        return "ml"
+    return unit or ""
+
+
+def to_base(amount, unit):
+    """Amount in the base unit of its group (g, ml); other units are unchanged."""
+    return None if amount is None else amount * (MASS.get(unit) or VOLUME.get(unit) or 1)
+
+
+def shopping_round(amount, key):
+    """Rounding of a summed amount per unit_key: g/ml 2 decimals, spoons 1 decimal, countable units up."""
+    if key in ("g", "ml"):
+        return round(amount, 2)
+    if key in SPOONS:
+        return round(amount, 1)
+    return math.ceil(round(amount, 4))
+
+
+def aggregate(lines):
+    """(name, amount, unit) lines with scaled amounts -> {name.casefold(): {name, amounts: {unit_key: summed amount}}}.
+    Amount-less lines only count when the name has no amount at all (amounts stays empty then)."""
+    items = {}
+    for name, amount, unit in lines:
+        item = items.setdefault(name.casefold(), {"name": name, "amounts": {}})
+        if amount is not None:
+            key = unit_key(unit)
+            item["amounts"][key] = item["amounts"].get(key, 0) + to_base(amount, unit)
+    for item in items.values():
+        item["amounts"] = {k: shopping_round(a, k) for k, a in item["amounts"].items()}
+    return items
+
+
+def format_note(parts):
+    """{unit_key: amount} -> '1,25 kg + 2 Dosen' (mass, volume, then other units alphabetically; '' if empty)."""
+    out = []
+    for key in sorted(parts, key=lambda k: ({"g": 0, "ml": 1}.get(k, 2), k.casefold())):
+        amount = parts[key]
+        if key in ("g", "ml") and amount >= 1000:
+            amount, key = amount / 1000, "kg" if key == "g" else "l"
+        out.append(fmt_amount(amount, key or None))
+    return " + ".join(out)

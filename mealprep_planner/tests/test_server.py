@@ -4,8 +4,9 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from mealprep import VERSION, db, server
+from mealprep import VERSION, db, ha, server
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
@@ -212,6 +213,7 @@ class DevServerTest(unittest.TestCase):
         self.assertEqual((slot["recipe"]["id"], slot["reason"]), (never, {"kind": "manual"}))
         slot = self.plan_slot(post("slots/4/dinner", {"action": "set", "recipe_id": nutri})[1], 4, "dinner")
         self.assertEqual(slot["recipe"]["title"], "Plan Nutri")
+        post("slots/4/lunch", {"action": "set", "recipe_id": ids[1]})  # the suggestion may have picked "Plan Nutri" for the lunch
         totals = self.call("GET", f"/api/plans/{week}")[1]["totals"]
         self.assertEqual((totals[4]["kcal"], totals[4]["estimated"], totals[4]["incomplete"]), (600, True, True))  # lunch has no nutrition
         self.call("POST", f"/api/recipes/{ids[0]}/archive")
@@ -243,6 +245,60 @@ class DevServerTest(unittest.TestCase):
         self.assertTrue(self.plan_slot(plan, 0, "lunch")["skipped"])
         self.assertEqual(plan["totals"][0]["kcal"], 0)
         self.assertFalse(self.plan_slot(post("slots/0/lunch", {"action": "unskip"})[1], 0, "lunch")["skipped"])
+
+    def test_pantry_api(self):
+        status, body = self.call("GET", "/api/pantry")
+        self.assertEqual((status, body["names"]), (200, sorted(db.DEFAULT_PANTRY, key=str.casefold)))
+        try:
+            self.assertEqual(self.call("PUT", "/api/pantry", {"names": [" Reis ", "reis", "Nudeln"]}), (200, {"names": ["Nudeln", "Reis"]}))
+            self.assertEqual(self.call("GET", "/api/pantry")[1], {"names": ["Nudeln", "Reis"]})
+            for bad in ("Reis", None, [""], [1], ["x" * 101], ["x"] * 301):
+                self.assertEqual(self.call("PUT", "/api/pantry", {"names": bad}), (400, {"error": "invalid_field", "field": "names"}))
+            self.assertEqual(self.call("PUT", "/api/pantry", [])[0], 400)
+        finally:
+            self.call("PUT", "/api/pantry", {"names": db.DEFAULT_PANTRY})
+
+    def test_shopping_list_confirm_and_push(self):
+        week = "2030-W11"
+        rid = self.call("POST", "/api/recipes", {
+            "format_version": 1, "title": "Einkauf", "servings": 2,
+            "ingredients": [{"amount": 500, "unit": "g", "name": "Nudeln", "note": None},
+                            {"amount": None, "unit": None, "name": "Salz", "note": None}]})[1]["id"]
+        post = lambda path, body=None: self.call("POST", f"/api/plans/{week}/{path}", body)
+        for bad in ("2026-W54", "abc"):
+            self.assertEqual(self.call("GET", f"/api/plans/{bad}/shopping")[1]["field"], "week")
+            self.assertEqual(self.call("POST", f"/api/plans/{bad}/push")[1]["field"], "week")
+        post("slots/0/lunch", {"action": "set", "recipe_id": rid})
+        self.assertEqual(self.call("GET", f"/api/plans/{week}/shopping")[1], {
+            "items": [{"name": "Nudeln", "note": "500 g", "status": "pending"}], "pantry": ["Salz"], "no_longer_needed": []})
+        self.assertEqual(post("push"), (400, {"error": "bad_request"}))  # only a confirmed plan is pushed
+
+        # no Bring! list chosen: the plan is confirmed anyway, the push reports bring_failed
+        status, plan = post("confirm")
+        self.assertEqual((status, plan["status"], plan["push"]), (200, "confirmed", {"error": "bring_failed"}))
+        self.assertEqual(post("push"), (502, {"error": "bring_failed"}))
+
+        calls = []
+
+        def stub(domain, service, data, return_response=False, timeout=10):
+            calls.append((service, data["item"] if service != "get_items" else None, data.get("description")))
+            return {"service_response": {data["entity_id"]: {"items": []}}}
+
+        with mock.patch.object(ha, "get_state", return_value={}):
+            self.call("PUT", "/api/settings", {"bring_entity": "todo.bring"})
+        try:
+            with mock.patch.object(ha, "call_service", stub):
+                status, plan = post("confirm")
+                self.assertEqual((status, plan["status"]), (200, "confirmed"))
+                self.assertEqual(plan["push"], {"added": [{"name": "Nudeln", "note": "500 g"}], "updated": [], "skipped_pantry": ["Salz"],
+                                                "no_longer_needed": [], "failed": []})
+                self.assertEqual(calls, [("get_items", None, None), ("add_item", "Nudeln", "500 g")])
+                self.assertEqual(self.call("GET", f"/api/plans/{week}/shopping")[1]["items"],
+                                 [{"name": "Nudeln", "note": "500 g", "status": "pushed"}])
+                status, result = post("push")  # nothing left to send
+                self.assertEqual((status, result["added"], len(calls)), (200, [], 2))
+        finally:
+            self.call("PUT", "/api/settings", {"bring_entity": None})
 
     def test_tag_crud(self):
         status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})

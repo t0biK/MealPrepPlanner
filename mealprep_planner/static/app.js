@@ -140,6 +140,19 @@ async function pageSettings(app) {
         return box;
       })]));
 
+  // pantry: one name per line, never pushed to Bring!
+  const pantry = el("textarea", { rows: 8, ariaLabel: t("settings.pantry") });
+  pantry.value = (await api("GET", "api/pantry")).names.join("\n");
+  pantry.onchange = async () => {
+    try {
+      const saved = await api("PUT", "api/pantry", { names: pantry.value.split("\n").map((n) => n.trim()).filter(Boolean) });
+      pantry.value = saved.names.join("\n");
+      toast(t("settings.saved"));
+    } catch (e) {
+      toast(errorText(e));
+    }
+  };
+
   const health = await api("GET", "api/health");
   app.replaceChildren(
     el("h1", { textContent: t("settings.title") }),
@@ -149,6 +162,7 @@ async function pageSettings(app) {
     card(t("settings.repeat_window_days"), numberSetting("repeat_window_days", 0, 60)),
     card(t("settings.new_per_week"), numberSetting("new_per_week", 0, 14)),
     await tagEditor(),
+    card(t("settings.pantry"), pantry, el("p", { className: "muted", textContent: t("settings.pantry_hint") })),
     card(t("settings.bring"), await entityPicker("todo", "bring_entity")),
     card(t("settings.inbox"), await entityPicker("todo", "inbox_entity")),
     card(t("settings.ai"),
@@ -620,12 +634,43 @@ function pickRecipe(onPick) {
   load();
 }
 
+// "name: note" line of a shopping/push entry (pantry entries are plain names)
+const entryText = (e) => (typeof e === "string" ? e : e.note ? `${e.name}: ${e.note}` : e.name);
+
+function pushPanel(r) {
+  if (r.error) return card(t("push.title"), el("p", { textContent: t(`error.${r.error}`) }));
+  const sections = [["push.added", r.added], ["push.updated", r.updated], ["push.failed", r.failed],
+    ["push.no_longer_needed", r.no_longer_needed], ["push.pantry", r.skipped_pantry]].filter(([, list]) => list.length);
+  const nothing = !(r.added.length || r.updated.length || r.failed.length || r.no_longer_needed.length);
+  return card(t("push.title"),
+    ...(nothing ? [el("p", { textContent: t("push.nothing") })] : []),
+    ...sections.flatMap(([key, list]) => [el("strong", { textContent: `${t(key)} (${list.length})` }),
+      el("ul", { className: "plain" }, ...list.map((e) => el("li", { textContent: entryText(e) })))]));
+}
+
+async function pageShopping(app, week) {
+  const data = await api("GET", `api/plans/${week}/shopping`);
+  app.replaceChildren(
+    el("h1", { textContent: t("shopping.title") }),
+    el("a", { href: "#/woche/" + week, textContent: t("shopping.back") }),
+    card(t("plan.week_label", { week }),
+      ...(data.items.length ? [el("ul", { className: "plain" }, ...data.items.map((i) => el("li", { className: "row" },
+        el("span", { textContent: entryText(i) }),
+        el("span", { className: "badge " + (i.status === "pushed" ? "ok" : ""), textContent: t(`shopping.status.${i.status}`) }))))]
+        : [el("p", { className: "muted", textContent: t("shopping.empty") })])),
+    ...(data.pantry.length ? [card(t("push.pantry"), el("p", { textContent: data.pantry.join(", ") }))] : []),
+    ...(data.no_longer_needed.length ? [card(t("push.no_longer_needed"),
+      el("ul", { className: "plain" }, ...data.no_longer_needed.map((e) => el("li", { textContent: entryText(e) }))))] : []));
+}
+
 async function pageWeek(app, week) {
   let plan = await api("GET", "api/plans/" + week);
+  let pushResult = null; // result of the last push to Bring! (kept while this page is open)
   const root = el("div");
   const act = async (path, body) => {
     try {
       plan = await api("POST", `api/plans/${week}/${path}`, body ?? {});
+      if (plan.push) pushResult = plan.push;
       show();
       return true;
     } catch (e) {
@@ -677,6 +722,15 @@ async function pageWeek(app, week) {
     confirmBtn.onclick = async () => {
       if (await act("confirm")) toast(t("plan.confirmed"));
     };
+    const resend = el("button", { type: "button", className: "secondary", textContent: t("plan.resend") });
+    resend.onclick = async () => {
+      try {
+        pushResult = await api("POST", `api/plans/${week}/push`);
+        show();
+      } catch (e) {
+        toast(errorText(e));
+      }
+    };
     root.replaceChildren(
       el("div", { className: "week-nav" },
         el("a", { className: "btn secondary", href: "#/woche/" + shiftWeek(week, -1), textContent: "‹", ariaLabel: t("plan.prev") }),
@@ -684,8 +738,11 @@ async function pageWeek(app, week) {
         el("a", { className: "btn secondary", href: "#/woche/" + shiftWeek(week, 1), textContent: "›", ariaLabel: t("plan.next") })),
       el("div", { className: "row" },
         el("span", { className: "badge " + (plan.status === "confirmed" ? "ok" : ""), textContent: t(`plan.status.${plan.status}`) }),
+        el("a", { href: `#/woche/${week}/einkauf`, textContent: t("plan.shopping") }),
         el("a", { href: "#/woche/" + shiftWeek(weekOf(new Date()), 1), textContent: t("plan.next_week") })),
-      el("div", { className: "actions" }, generate, confirmBtn),
+      el("div", { className: "actions" }, generate, confirmBtn, ...(plan.status === "confirmed" ? [resend] : [])),
+      ...(plan.status === "confirmed" ? [el("p", { className: "muted", textContent: t("plan.resend_hint") })] : []),
+      ...(pushResult ? [pushPanel(pushResult)] : []),
       ...plan.dates.map((iso, day) => card(
         parseDate(iso).toLocaleDateString(lang, { weekday: "long", day: "numeric", month: "numeric" }),
         ...plan.slots.filter((s) => s.day === day).map(slotView),
@@ -845,6 +902,7 @@ function routePage(parts) {
   if (a === "woche") {
     if (!b) return ["woche", async () => location.replace("#/woche/" + weekOf(new Date()))];
     if (/^\d{4}-W\d{2}$/.test(b) && !c) return ["woche", (app) => pageWeek(app, b)];
+    if (/^\d{4}-W\d{2}$/.test(b) && c === "einkauf") return ["woche", (app) => pageShopping(app, b)];
   }
   if (a === "rezepte") {
     if (!b) return ["rezepte", pageRecipes];

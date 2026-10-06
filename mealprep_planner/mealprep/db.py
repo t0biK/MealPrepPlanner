@@ -10,6 +10,9 @@ DEFAULT_TAGS = [
     "Suppe", "Eintopf", "Salat", "Auflauf", "Pfanne", "Bowl", "Deutsch", "Italienisch", "Asiatisch",
     "Mexikanisch", "Orientalisch", "Indisch", "Schnell", "Leicht", "Low Carb", "Deftig",
 ]
+DEFAULT_PANTRY = [
+    "Salz", "Pfeffer", "Zucker", "Mehl", "Wasser", "Öl", "Olivenöl", "Rapsöl", "Sonnenblumenöl", "Essig", "Paprikapulver",
+]
 
 # Append-only: a shipped migration is never edited. user_version = number of applied scripts.
 MIGRATIONS = [
@@ -109,6 +112,20 @@ MIGRATIONS = [
       skipped   INTEGER NOT NULL DEFAULT 0,
       reason    TEXT,
       PRIMARY KEY (week, day, meal)
+    );
+    """,
+    f"""
+    CREATE TABLE pantry (
+      name TEXT PRIMARY KEY COLLATE NOCASE
+    );
+    INSERT INTO pantry (name) VALUES {", ".join(f"('{n}')" for n in DEFAULT_PANTRY)};
+    CREATE TABLE pushed_items (
+      week      TEXT NOT NULL,
+      name      TEXT NOT NULL COLLATE NOCASE,
+      unit_key  TEXT NOT NULL,
+      amount    REAL,
+      pushed_at TEXT NOT NULL,
+      PRIMARY KEY (week, name, unit_key)
     );
     """,
 ]

@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -23,7 +24,14 @@ class DbTest(unittest.TestCase):
         db.migrate(self.conn)
         self.assertEqual(self.version(), len(db.MIGRATIONS))
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertLessEqual({"settings", "users", "tags", "recipes", "ingredients", "recipe_tags", "import_jobs", "ratings", "plans", "plan_slots"}, tables)
+        self.assertLessEqual({"settings", "users", "tags", "recipes", "ingredients", "recipe_tags", "import_jobs", "ratings", "plans", "plan_slots", "pantry", "pushed_items"}, tables)
+
+    def test_default_pantry_is_filled_by_migration(self):
+        names = [r[0] for r in self.conn.execute("SELECT name FROM pantry")]
+        self.assertEqual(sorted(names), sorted(db.DEFAULT_PANTRY))
+        self.assertEqual(len(names), 11)
+        with self.assertRaises(sqlite3.IntegrityError):  # names are unique, case-insensitively
+            self.conn.execute("INSERT INTO pantry (name) VALUES ('salz')")
 
     def test_settings_defaults(self):
         self.assertEqual(db.get_settings(self.conn), {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2,

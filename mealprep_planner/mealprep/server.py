@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import VERSION, db, ha, ingredients, plans, planner, recipes, worker
+from . import VERSION, db, ha, ingredients, plans, planner, recipes, shopping, worker
 
 INGRESS_IP = "172.30.32.2"
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -512,9 +512,39 @@ def api_plan_slot(h, m):
 
 
 def api_confirm_plan(h, m):
+    """Confirm, then push to Bring!; the plan stays confirmed when the push fails (`push.error`)."""
     week = _week(m)
     plans.confirm(h.conn, week, db.get_settings(h.conn))
-    h.send_json(200, _plan_json(h, week))
+    try:
+        push = shopping.push(h.conn, week)
+    except shopping.BringFailed:
+        push = {"error": "bring_failed"}
+    h.send_json(200, {**_plan_json(h, week), "push": push})
+
+
+# ---- shopping list and Bring! push (M8) ----
+
+def api_get_shopping(h, m):
+    h.send_json(200, shopping.view(h.conn, _week(m)))
+
+
+def api_push_plan(h, m):
+    week = _week(m)
+    row = h.conn.execute("SELECT status FROM plans WHERE week = ?", (week,)).fetchone()
+    if row is None or row["status"] != "confirmed":
+        raise ApiError(400, "bad_request")
+    try:
+        h.send_json(200, shopping.push(h.conn, week))
+    except shopping.BringFailed:
+        raise ApiError(502, "bring_failed")
+
+
+def api_get_pantry(h, m):
+    h.send_json(200, {"names": shopping.get_pantry(h.conn)})
+
+
+def api_put_pantry(h, m):
+    h.send_json(200, {"names": shopping.set_pantry(h.conn, _body_dict(h).get("names"))})
 
 
 ROUTES = [
@@ -522,6 +552,10 @@ ROUTES = [
     ("POST", re.compile(r"^/api/plans/([^/]+)/generate$"), api_generate_plan),
     ("POST", re.compile(r"^/api/plans/([^/]+)/slots/(\d+)/([a-z]+)$"), api_plan_slot),
     ("POST", re.compile(r"^/api/plans/([^/]+)/confirm$"), api_confirm_plan),
+    ("GET", re.compile(r"^/api/plans/([^/]+)/shopping$"), api_get_shopping),
+    ("POST", re.compile(r"^/api/plans/([^/]+)/push$"), api_push_plan),
+    ("GET", re.compile(r"^/api/pantry$"), api_get_pantry),
+    ("PUT", re.compile(r"^/api/pantry$"), api_put_pantry),
     ("GET", re.compile(r"^/images/([0-9a-f]{64}\.(jpg|png|webp))$"), api_image),
     ("POST", re.compile(r"^/api/imports$"), api_create_imports),
     ("GET", re.compile(r"^/api/imports$"), api_list_imports),

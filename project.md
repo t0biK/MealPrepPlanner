@@ -791,7 +791,7 @@ Follow the results V3–V5 in §5; if they contradict this description, ask befo
 - [ ] An item already open in Bring! (e.g. "Milch") gets our amount appended instead of a duplicate (manual, phone).
 - [ ] After replacing one meal and confirming again, only new or increased items are added; items no longer needed are listed in the app (manual).
 - [ ] With a broken Bring! connection during confirm, the plan is still confirmed and "Erneut senden" later pushes the rest (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M9 – Today page, rating prompt and HA sensor
 
