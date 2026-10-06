@@ -154,11 +154,28 @@ async function pageSettings(app) {
     }
   };
 
+  // household: everyone who eats along is put on every meal of a new week
+  const household = el("ul", { className: "plain" }, ...(await api("GET", "api/household")).map((p) => {
+    const box = el("input", { type: "checkbox", checked: p.eats });
+    box.onchange = async () => {
+      try {
+        await api("PUT", "api/household/" + encodeURIComponent(p.user_id), { eats: box.checked });
+        toast(t("settings.saved"));
+      } catch (e) {
+        box.checked = !box.checked;
+        toast(errorText(e));
+      }
+    };
+    return el("li", {}, el("label", { className: "row" }, el("strong", { textContent: p.display_name }),
+      el("span", {}, box, " " + t("settings.eats"))));
+  }));
+
   const health = await api("GET", "api/health");
   app.replaceChildren(
     el("h1", { textContent: t("settings.title") }),
     card(t("settings.language"), lang),
     card(t("settings.default_portions"), numberSetting("default_portions", 1, 12)),
+    card(t("settings.household"), household, el("p", { className: "muted", textContent: t("settings.household_hint") })),
     card(t("settings.slot_pattern"), patternGrid, el("p", { className: "muted", textContent: t("settings.slot_pattern_hint") })),
     card(t("settings.repeat_window_days"), numberSetting("repeat_window_days", 0, 60)),
     card(t("settings.new_per_week"), numberSetting("new_per_week", 0, 14)),
@@ -771,6 +788,7 @@ async function pageShopping(app, week) {
 
 async function pageWeek(app, week) {
   let plan = await api("GET", "api/plans/" + week);
+  const household = await api("GET", "api/household");
   const root = el("div");
   const act = async (path, body) => {
     try {
@@ -796,16 +814,25 @@ async function pageWeek(app, week) {
         el("span", { className: "muted", textContent: t("plan.off") }),
         icon("▶", t("plan.activate"), () => slotAct(s, { action: "activate" }))));
     }
-    const minus = icon("−", t("plan.portions_less"), () => slotAct(s, { action: "portions", portions: s.portions - 1 }));
-    const plus = icon("+", t("plan.portions_more"), () => slotAct(s, { action: "portions", portions: s.portions + 1 }));
-    minus.disabled = s.portions <= 1;
-    plus.disabled = s.portions >= 12;
+    const minus = icon("−", t("plan.guests_less"), () => slotAct(s, { action: "guests", n: s.guests - 1 }));
+    const plus = icon(t("plan.guest_add"), t("plan.guests_more"), () => slotAct(s, { action: "guests", n: s.guests + 1 }));
+    minus.disabled = s.guests <= 0;
+    plus.disabled = s.guests >= 12;
+    const eating = new Set(s.eaters.map((p) => p.user_id));
+    const chips = el("div", { className: "chips", role: "group", ariaLabel: t("plan.eaters") },
+      ...household.filter((p) => p.eats || eating.has(p.user_id)).map((p) => {
+        const box = el("input", { type: "checkbox", checked: eating.has(p.user_id) });
+        box.onchange = () => slotAct(s, { action: "eater", user_id: p.user_id, on: box.checked });
+        return el("label", { className: "chip pick" }, box, p.display_name);
+      }));
     const past = plan.status === "confirmed" && s.date < plan.today;  // cooked: the server refuses reroll/set/clear
     const skip = el("input", { type: "checkbox", checked: s.skipped });
     skip.onchange = () => slotAct(s, { action: skip.checked ? "skip" : "unskip" });
     return el("div", { className: "slot" + (s.skipped ? " skipped" : "") },
-      el("div", { className: "row" }, meal,
-        el("div", { className: "stepper", role: "group", ariaLabel: t("plan.portions") }, minus, el("strong", { textContent: s.portions }), plus)),
+      el("div", { className: "row" }, meal, el("span", { className: "muted", textContent: t("plan.cooked", { n: s.cooked_portions }) })),
+      chips,
+      el("div", { className: "row" }, el("span", { className: "muted", textContent: t("plan.guests") }),
+        el("div", { className: "stepper", role: "group", ariaLabel: t("plan.guests") }, minus, el("strong", { textContent: s.guests }), plus)),
       ...(s.recipe ? [...image(s.recipe.image), el("a", { href: "#/rezepte/" + s.recipe.id, textContent: s.recipe.title })]
         : [el("span", { className: "muted", textContent: t("plan.empty_slot") })]),
       el("p", { className: "muted", textContent: reasonText(s.reason) }),
@@ -856,8 +883,8 @@ async function pageToday(app) {
     { weekday: "long", day: "numeric", month: "numeric" });
   const mealRow = (meal, s) => el("div", { className: "row" },
     el("strong", { textContent: t(meal === "lunch" ? "form.lunch" : "form.dinner") }),
-    s ? el("span", {}, el("a", { href: recipeHref(s.recipe_id, s.portions), textContent: s.title }), " ",
-      el("span", { className: "muted", textContent: t("today.portions", { n: s.portions }) }))
+    s ? el("span", {}, el("a", { href: recipeHref(s.recipe_id, s.cooked_portions), textContent: s.title }), " ",
+      el("span", { className: "muted", textContent: t("today.portions", { n: s.cooked_portions }) }))
       : el("span", { className: "muted", textContent: "–" }));
   const dayCard = (label, d) => card(`${t(label)} · ${dayText(d.date)}`,
     ...(d.lunch || d.dinner ? [mealRow("lunch", d.lunch), mealRow("dinner", d.dinner)]

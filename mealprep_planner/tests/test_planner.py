@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 
-from mealprep import db, planner
+from mealprep import db, plans, planner
 
 WEEK = "2026-W41"  # Monday 2026-10-05
 MONDAY = date(2026, 10, 5)
@@ -17,7 +17,7 @@ def recipe(rid, lunch=True, dinner=True, archived=False, tags=()):
 
 def make_plan(active=None, overrides=None):
     """14 empty slots; `active` = set of (day, meal) that are switched on (default: all)."""
-    slots = [{"day": d, "meal": m, "active": active is None or (d, m) in active, "recipe_id": None, "portions": 2,
+    slots = [{"day": d, "meal": m, "active": active is None or (d, m) in active, "recipe_id": None, "eaters": [], "guests": 0,
               "locked": False, "skipped": False, "reason": None} for d in range(7) for m in planner.MEALS]
     for (d, m), values in (overrides or {}).items():
         next(s for s in slots if (s["day"], s["meal"]) == (d, m)).update(values)
@@ -277,7 +277,7 @@ class HistoryTest(unittest.TestCase):
                     conn.executemany("INSERT INTO plans (week, status) VALUES (?, ?)",
                                      [("2026-W40", "confirmed"), ("2026-W41", "confirmed"), ("2026-W42", "draft")])
                     conn.executemany(
-                        "INSERT INTO plan_slots (week, day, meal, active, recipe_id, portions, skipped) VALUES (?, ?, ?, ?, ?, 2, ?)",
+                        "INSERT INTO plan_slots (week, day, meal, active, recipe_id, skipped) VALUES (?, ?, ?, ?, ?, ?)",
                         [("2026-W40", 2, "lunch", 1, 1, 0),   # counts: Wednesday 2026-09-30
                          ("2026-W40", 3, "dinner", 1, 2, 1),  # skipped
                          ("2026-W40", 4, "dinner", 0, 3, 0),  # switched off
@@ -288,6 +288,83 @@ class HistoryTest(unittest.TestCase):
                 self.assertEqual(sorted(planner.history(conn, "2026-W40")), [(4, date(2026, 10, 5))])
             finally:
                 conn.close()
+
+
+class EatersTest(unittest.TestCase):
+    """M11: who eats a slot, guests, cooked portions (plans.py on a real DB)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(self.tmp.name)
+        db.migrate(self.conn)
+        for uid, name in (("a", "Anna"), ("b", "Ben"), ("c", "Cleo")):
+            db.upsert_user(self.conn, {"id": uid, "name": uid, "display_name": name})
+        db.set_household(self.conn, "c", {"eats": False})
+        self.settings = {**db.get_settings(self.conn), "slot_pattern": [i != 1 for i in range(14)]}  # Monday dinner off
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def slots(self, week=WEEK):
+        return {(s["day"], s["meal"]): s for s in plans.load_plan(self.conn, week, self.settings)["slots"]}
+
+    def act(self, day, meal, **body):
+        plans.slot_action(self.conn, WEEK, day, meal, body, self.settings, random.Random(1), MONDAY)
+        return self.slots()[(day, meal)]
+
+    def test_new_week_puts_exactly_the_participants_on_every_active_slot(self):
+        slots = self.slots()
+        self.assertEqual({tuple(s["eaters"]) for k, s in slots.items() if s["active"]}, {("a", "b")})
+        self.assertEqual(slots[(0, "dinner")]["eaters"], [])
+        self.assertEqual({(s["guests"], plans.cooked_portions(s)) for s in slots.values() if s["active"]}, {(0, 2)})
+
+    def test_eater_and_guests_actions(self):
+        s = self.act(0, "lunch", action="eater", user_id="b", on=False)
+        self.assertEqual((s["eaters"], plans.cooked_portions(s)), (["a"], 1))
+        s = self.act(0, "lunch", action="eater", user_id="c", on=True)  # a non-participant may be added by hand
+        self.assertEqual(s["eaters"], ["a", "c"])
+        s = self.act(0, "lunch", action="eater", user_id="c", on=True)  # idempotent
+        self.assertEqual(s["eaters"], ["a", "c"])
+        s = self.act(0, "lunch", action="guests", n=3)
+        self.assertEqual((s["guests"], plans.cooked_portions(s)), (3, 5))
+        for n in (0, 12):
+            self.assertEqual(self.act(0, "lunch", action="guests", n=n)["guests"], n)
+        for n in (-1, 13, 1.5, "1", True, None):
+            with self.assertRaises(db.InvalidField) as cm:
+                self.act(0, "lunch", action="guests", n=n)
+            self.assertEqual(cm.exception.field, "n")
+        for body, field in [({"user_id": "x", "on": True}, "user_id"), ({"user_id": 1, "on": True}, "user_id"),
+                            ({"on": True}, "user_id"), ({"user_id": "a", "on": "yes"}, "on"), ({"user_id": "a"}, "on")]:
+            with self.assertRaises(db.InvalidField) as cm:
+                self.act(0, "lunch", action="eater", **body)
+            self.assertEqual(cm.exception.field, field)
+        with self.assertRaises(plans.Refused):  # a switched-off slot has no eaters
+            self.act(0, "dinner", action="eater", user_id="a", on=True)
+
+    def test_portions_action_is_gone(self):
+        with self.assertRaises(db.InvalidField) as cm:
+            self.act(0, "lunch", action="portions", portions=3)
+        self.assertEqual(cm.exception.field, "action")
+
+    def test_activate_re_adds_the_participants_and_deactivate_clears_them(self):
+        self.act(0, "lunch", action="eater", user_id="a", on=False)
+        self.act(0, "lunch", action="guests", n=2)
+        s = self.act(0, "lunch", action="deactivate")
+        self.assertEqual((s["active"], s["eaters"], s["guests"]), (False, [], 0))
+        db.set_household(self.conn, "c", {"eats": True})
+        s = self.act(0, "lunch", action="activate")
+        self.assertEqual((s["active"], s["eaters"]), (True, ["a", "b", "c"]))
+        s = self.act(0, "dinner", action="activate")  # the slot the pattern had switched off
+        self.assertEqual(s["eaters"], ["a", "b", "c"])
+
+    def test_eaters_survive_generate_and_a_changed_household_only_affects_new_weeks(self):
+        self.act(0, "lunch", action="eater", user_id="b", on=False)
+        db.set_household(self.conn, "a", {"eats": False})
+        plans.generate(self.conn, WEEK, self.settings, random.Random(1), MONDAY)
+        self.assertEqual(self.slots()[(0, "lunch")]["eaters"], ["a"])
+        self.assertEqual(self.slots()[(1, "lunch")]["eaters"], ["a", "b"])
+        self.assertEqual(self.slots("2026-W42")[(0, "lunch")]["eaters"], ["b"])
 
 
 if __name__ == "__main__":

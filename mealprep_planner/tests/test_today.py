@@ -77,15 +77,17 @@ class PlanDataTest(unittest.TestCase):
                     "VALUES (?, 'manual', 2, 'x', 'x')", (title,)).lastrowid
         return self.recipes[title]
 
-    def slot(self, day, meal, title, status="confirmed", active=1, skipped=0, portions=2):
-        """Put a recipe on a date (creates the plan of its week)."""
+    def slot(self, day, meal, title, status="confirmed", active=1, skipped=0, guests=1, eaters=("me",)):
+        """Put a recipe on a date (creates the plan of its week); cooked portions = eaters + guests."""
         week = planner.week_of(day)
         with self.conn:
             self.conn.execute("INSERT OR IGNORE INTO plans (week, status) VALUES (?, ?)", (week, status))
             self.conn.execute("DELETE FROM plan_slots WHERE week = ? AND day = ? AND meal = ?", (week, day.weekday(), meal))
             self.conn.execute(
-                "INSERT INTO plan_slots (week, day, meal, active, recipe_id, portions, skipped) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (week, day.weekday(), meal, active, self.recipe(title) if title else None, portions, skipped))
+                "INSERT INTO plan_slots (week, day, meal, active, recipe_id, guests, skipped) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (week, day.weekday(), meal, active, self.recipe(title) if title else None, guests, skipped))
+            self.conn.executemany("INSERT INTO slot_eaters (week, day, meal, user_id) VALUES (?, ?, ?, ?)",
+                                  [(week, day.weekday(), meal, u) for u in eaters])
 
     def rate(self, user, title, stars=3):
         with self.conn:
@@ -150,14 +152,14 @@ class RateListTest(PlanDataTest):
 
 class TodayViewTest(PlanDataTest):
     def test_today_and_tomorrow(self):
-        self.slot(TODAY, "dinner", "Carbonara", status="draft", portions=3)
+        self.slot(TODAY, "dinner", "Carbonara", status="draft", guests=2)
         self.slot(TODAY + timedelta(days=1), "lunch", "Curry")
         self.slot(TODAY + timedelta(days=1), "dinner", "Pizza", skipped=1)
         view = plans.today_view(self.conn, "me", TODAY)
         self.assertEqual(view["today"], {"date": "2026-10-14", "lunch": None, "dinner": {
-            "recipe_id": self.recipe("Carbonara"), "title": "Carbonara", "image": None, "portions": 3}})
+            "recipe_id": self.recipe("Carbonara"), "title": "Carbonara", "image": None, "cooked_portions": 3}})
         self.assertEqual(view["tomorrow"], {"date": "2026-10-15", "dinner": None, "lunch": {
-            "recipe_id": self.recipe("Curry"), "title": "Curry", "image": None, "portions": 2}})
+            "recipe_id": self.recipe("Curry"), "title": "Curry", "image": None, "cooked_portions": 2}})
         self.assertEqual(view["rate"], [])
 
     def test_does_not_create_plans(self):

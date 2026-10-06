@@ -101,11 +101,17 @@ class ShoppingTestCase(unittest.TestCase):
                                   [(rid, i, *row) for i, row in enumerate(ingredient_rows)])
         return rid
 
-    def slot(self, day, meal, recipe_id, portions=2, active=1, skipped=0, week=WEEK):
+    def slot(self, day, meal, recipe_id, portions=2, active=1, skipped=0, week=WEEK, eaters=()):
+        """`portions` are cooked via guests; `eaters` (user ids) come on top."""
         with self.conn:
+            self.conn.execute("DELETE FROM slot_eaters WHERE week = ? AND day = ? AND meal = ?", (week, day, meal))
             self.conn.execute("DELETE FROM plan_slots WHERE week = ? AND day = ? AND meal = ?", (week, day, meal))
-            self.conn.execute("INSERT INTO plan_slots (week, day, meal, active, recipe_id, portions, skipped) "
+            self.conn.execute("INSERT INTO plan_slots (week, day, meal, active, recipe_id, guests, skipped) "
                               "VALUES (?, ?, ?, ?, ?, ?, ?)", (week, day, meal, active, recipe_id, portions, skipped))
+            for u in eaters:
+                self.conn.execute("INSERT OR IGNORE INTO users (id, name, display_name, first_seen, last_seen) "
+                                  "VALUES (?, ?, ?, 'x', 'x')", (u, u, u))
+                self.conn.execute("INSERT INTO slot_eaters (week, day, meal, user_id) VALUES (?, ?, ?, ?)", (week, day, meal, u))
 
     def configure(self):
         with mock.patch.object(ha, "get_state", return_value={}):
@@ -131,6 +137,17 @@ class BuildListTest(ShoppingTestCase):
         items = shopping.build_list(self.conn, WEEK)
         self.assertEqual({k: i["amounts"] for k, i in items.items()},
                          {"spaghetti": {"g": 3200}, "eier": {"": 2}, "salz": {}, "tomaten": {"Dose": 4}})  # 200 + 3000 g; 0.5 + 3 Dosen -> 4
+
+    def test_scaled_by_eaters_plus_guests(self):
+        rid = self.recipe(4, [(400, "g", "Reis"), (None, None, "Salz")])
+        self.slot(0, "lunch", rid, portions=1, eaters=["a", "b"])  # 3 cooked portions
+        self.assertEqual(shopping.build_list(self.conn, WEEK)["reis"]["amounts"], {"g": 300})
+        self.slot(0, "lunch", rid, portions=0, eaters=["a"])  # 1 cooked portion
+        self.assertEqual(shopping.build_list(self.conn, WEEK)["reis"]["amounts"], {"g": 100})
+
+    def test_slot_without_anyone_to_cook_for_adds_nothing(self):
+        self.slot(0, "lunch", self.recipe(2, [(200, "g", "Reis"), (None, None, "Salz")]), portions=0)
+        self.assertEqual(shopping.build_list(self.conn, WEEK), {})
 
     def test_pantry_items_are_kept_and_flagged_case_insensitively(self):
         rid = self.recipe(2, [(None, None, "salz"), (2, "EL", "Olivenöl"), (200, "g", "Nudeln"), (1, "EL", "zucker")])

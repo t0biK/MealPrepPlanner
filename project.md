@@ -940,7 +940,7 @@ Goal: nothing reaches Bring! unless a person ticks it; Chefkoch-style Bring! imp
 **Acceptance**
 - [ ] Two HA users with "Ich esse mit" appear on every slot of a new week; removing one from a slot and adding a guest changes the cooked portions and the shopping amounts (manual).
 - [ ] A user who does not eat along is not put on new weeks (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M12 – Weight loss: targets, canteen and personal portions
 

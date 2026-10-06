@@ -164,7 +164,7 @@ class StoreTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = db.connect(self.tmp.name)
         db.migrate(self.conn)
-        self.conn.execute("INSERT INTO users VALUES ('u', 'n', 'N', NULL, 'now', 'now')")
+        self.conn.execute("INSERT INTO users (id, name, display_name, lang, first_seen, last_seen) VALUES ('u', 'n', 'N', NULL, 'now', 'now')")
         self.conn.commit()
         self.tags = [t["name"] for t in recipes.list_tags(self.conn)]
         (Path(self.tmp.name) / "images").mkdir()
@@ -254,7 +254,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(recipes.known_ingredient_names(self.conn), ["Äpfel", "Butter", "Mehl", "zucker"])
 
     def test_ratings_per_person(self):
-        self.conn.execute("INSERT INTO users VALUES ('v', 'm', 'Mia', NULL, 'now', 'now')")
+        self.conn.execute("INSERT INTO users (id, name, display_name, lang, first_seen, last_seen) VALUES ('v', 'm', 'Mia', NULL, 'now', 'now')")
         self.conn.commit()
         a, b = self.make(title="A"), self.make(title="B", tags=["Suppe"])
         self.assertTrue(recipes.set_rating(self.conn, "u", a, 4))

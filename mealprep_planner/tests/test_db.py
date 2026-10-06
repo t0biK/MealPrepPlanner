@@ -24,7 +24,7 @@ class DbTest(unittest.TestCase):
         db.migrate(self.conn)
         self.assertEqual(self.version(), len(db.MIGRATIONS))
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertLessEqual({"settings", "users", "tags", "recipes", "ingredients", "recipe_tags", "import_jobs", "ratings", "plans", "plan_slots", "pantry", "pushed_items"}, tables)
+        self.assertLessEqual({"settings", "users", "tags", "recipes", "ingredients", "recipe_tags", "import_jobs", "ratings", "plans", "plan_slots", "pantry", "pushed_items", "slot_eaters"}, tables)
 
     def test_default_pantry_is_filled_by_migration(self):
         names = [r[0] for r in self.conn.execute("SELECT name FROM pantry")]
@@ -94,6 +94,48 @@ class DbTest(unittest.TestCase):
                 self.assertEqual(cm.exception.field, field)
             self.assertIsNone(db.set_settings(self.conn, {"inbox_entity": None})["inbox_entity"])
             self.assertEqual(db.get_settings(self.conn)["bring_entity"], "todo.bring")
+
+    def test_migration_7_on_a_db_with_existing_plans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.connect(tmp)
+            try:
+                for n, script in enumerate(db.MIGRATIONS[:6], start=1):  # the database as shipped with M8-M10
+                    conn.executescript(f"BEGIN; {script} PRAGMA user_version = {n}; COMMIT;")
+                with conn:
+                    conn.executemany("INSERT INTO users (id, name, display_name, first_seen, last_seen) VALUES (?, ?, ?, 'x', 'x')",
+                                     [("a", "a", "A"), ("b", "b", "B")])
+                    conn.execute("INSERT INTO recipes (id, title, source_kind, servings, created_at, updated_at) "
+                                 "VALUES (1, 'r', 'manual', 2, 'x', 'x')")
+                    conn.execute("INSERT INTO plans (week, status) VALUES ('2026-W41', 'confirmed')")
+                    conn.executemany("INSERT INTO plan_slots (week, day, meal, active, recipe_id, portions, reason) VALUES ('2026-W41', ?, ?, ?, ?, ?, ?)",
+                                     [(0, "lunch", 1, 1, 4, '{"kind": "manual"}'), (0, "dinner", 0, None, 2, None), (1, "lunch", 1, 1, 6, None)])
+                db.migrate(conn)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], len(db.MIGRATIONS))
+                self.assertNotIn("portions", [r["name"] for r in conn.execute("PRAGMA table_info(plan_slots)")])
+                self.assertEqual([tuple(r) for r in conn.execute("SELECT day, meal, user_id FROM slot_eaters ORDER BY day, meal, user_id")],
+                                 [(0, "lunch", "a"), (0, "lunch", "b"), (1, "lunch", "a"), (1, "lunch", "b")])  # active slots only
+                self.assertEqual([tuple(r) for r in conn.execute("SELECT day, meal, recipe_id, guests, reason FROM plan_slots ORDER BY day, meal")],
+                                 [(0, "dinner", None, 0, None), (0, "lunch", 1, 0, '{"kind": "manual"}'), (1, "lunch", 1, 0, None)])
+                self.assertEqual([r["eats"] for r in conn.execute("SELECT eats FROM users")], [1, 1])
+                conn.execute("DELETE FROM plan_slots WHERE day = 1")  # eaters follow their slot
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM slot_eaters").fetchone()[0], 2)
+            finally:
+                conn.close()
+
+    def test_household_validation(self):
+        db.upsert_user(self.conn, {"id": "u1", "name": "n", "display_name": "B"})
+        db.upsert_user(self.conn, {"id": "u2", "name": "m", "display_name": "a"})
+        self.assertEqual(db.household(self.conn), [{"user_id": "u2", "display_name": "a", "eats": True},
+                                                   {"user_id": "u1", "display_name": "B", "eats": True}])
+        self.assertEqual(db.set_household(self.conn, "u1", {"eats": False}), {"user_id": "u1", "display_name": "B", "eats": False})
+        self.assertEqual(db.set_household(self.conn, "u1", {}), {"user_id": "u1", "display_name": "B", "eats": False})
+        self.assertIsNone(db.set_household(self.conn, "nobody", {"eats": True}))
+        for patch, field in [({"eats": 1}, "eats"), ({"eats": "yes"}, "eats"), ({"eats": None}, "eats"), ({"nope": True}, "nope"),
+                             ({"eats": True, "nope": True}, "nope"), ([], "body")]:
+            with self.assertRaises(db.InvalidField) as cm:
+                db.set_household(self.conn, "u1", patch)
+            self.assertEqual(cm.exception.field, field)
+        self.assertFalse(db.household(self.conn)[1]["eats"])  # a rejected patch changes nothing
 
     def test_user_upsert_and_lang(self):
         user = {"id": "u1", "name": "n", "display_name": "N"}

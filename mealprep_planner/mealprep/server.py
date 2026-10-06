@@ -579,6 +579,19 @@ def api_put_pantry(h, m):
     h.send_json(200, {"names": shopping.set_pantry(h.conn, _body_dict(h).get("names"))})
 
 
+# ---- household (M11) ----
+
+def api_get_household(h, m):
+    h.send_json(200, db.household(h.conn))
+
+
+def api_put_household(h, m):
+    person = db.set_household(h.conn, m.group(1), h.read_json())
+    if person is None:
+        raise ApiError(404, "not_found")
+    h.send_json(200, person)
+
+
 # ---- today page (M9) ----
 
 def api_today(h, m):
@@ -587,6 +600,8 @@ def api_today(h, m):
 
 ROUTES = [
     ("GET", re.compile(r"^/api/today$"), api_today),
+    ("GET", re.compile(r"^/api/household$"), api_get_household),
+    ("PUT", re.compile(r"^/api/household/([^/]+)$"), api_put_household),
     ("GET", re.compile(r"^/api/plans/([^/]+)$"), api_get_plan),
     ("POST", re.compile(r"^/api/plans/([^/]+)/generate$"), api_generate_plan),
     ("POST", re.compile(r"^/api/plans/([^/]+)/slots/(\d+)/([a-z]+)$"), api_plan_slot),

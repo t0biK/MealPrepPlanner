@@ -128,6 +128,21 @@ MIGRATIONS = [
       PRIMARY KEY (week, name, unit_key)
     );
     """,
+    """
+    ALTER TABLE users ADD COLUMN eats INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE plan_slots ADD COLUMN guests INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE slot_eaters (
+      week    TEXT NOT NULL,
+      day     INTEGER NOT NULL,
+      meal    TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      PRIMARY KEY (week, day, meal, user_id),
+      FOREIGN KEY (week, day, meal) REFERENCES plan_slots(week, day, meal) ON DELETE CASCADE
+    );
+    INSERT INTO slot_eaters (week, day, meal, user_id)
+      SELECT s.week, s.day, s.meal, u.id FROM plan_slots s CROSS JOIN users u WHERE s.active = 1;
+    ALTER TABLE plan_slots DROP COLUMN portions;
+    """,
 ]
 
 DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None,
@@ -231,3 +246,23 @@ def upsert_user(conn, user):
 def set_user_lang(conn, user_id, lang):
     with conn:
         conn.execute("UPDATE users SET lang = ? WHERE id = ?", (lang, user_id))
+
+
+def household(conn):
+    """[{user_id, display_name, eats}] of every registered user, sorted by name."""
+    rows = conn.execute("SELECT id, display_name, eats FROM users").fetchall()
+    return sorted(({"user_id": r["id"], "display_name": r["display_name"], "eats": bool(r["eats"])} for r in rows),
+                  key=lambda p: (p["display_name"].casefold(), p["user_id"]))
+
+
+def set_household(conn, user_id, patch):
+    """Validate the whole patch (`eats`: bool), then store it. Returns the person's household entry, None for an unknown user."""
+    if not isinstance(patch, dict):
+        raise InvalidField("body")
+    for key, value in patch.items():
+        if key != "eats" or not isinstance(value, bool):
+            raise InvalidField(key)
+    with conn:
+        if "eats" in patch:
+            conn.execute("UPDATE users SET eats = ? WHERE id = ?", (int(patch["eats"]), user_id))
+    return next((p for p in household(conn) if p["user_id"] == user_id), None)

@@ -2,7 +2,7 @@
 
 ratings: {user_id: {recipe_id: stars 0-5}}   tags: {recipe_id: [tag names]}   users: [user_id]
 recipes: [{id, for_lunch, for_dinner, archived, tags}]   history: [(recipe_id, date)]
-slot: {day 0-6, meal, active, recipe_id, portions, locked, skipped, reason}   plan: {week, slots: [slot x 14]}
+slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason}   plan: {week, slots: [slot x 14]}
 dated slot (sensor_payload): {date, meal, title}
 """
 import math
