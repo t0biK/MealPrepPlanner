@@ -1,10 +1,10 @@
 # MealPrep Planner
 
-Single source of truth for scope, architecture and roadmap. Planning session: 2026-10-06.
+Single source of truth for scope, architecture and roadmap. Planning session 2026-10-06; later the same day the scope change "Weight Loss Journey" (M10–M14) was agreed.
 
 ## 1. Vision
 
-MealPrep Planner is a Home Assistant App that turns the household's own recipe collection (imported from links such as Chefkoch, TikTok, YouTube or Instagram) into a weekly lunch-and-dinner plan. Every household member rates meals with 0–5 stars, and the planner uses these ratings transparently to suggest what the household likes while still mixing in new recipes. Confirming a week pushes the merged, scaled shopping list to Bring!.
+MealPrep Planner is a Home Assistant App that turns the household's own recipe collection (imported from links such as Chefkoch, TikTok, YouTube or Instagram) into a weekly lunch-and-dinner plan. Every household member rates meals with 0–5 stars, and the planner uses these ratings transparently to suggest what the household likes while still mixing in new recipes. For the household's weight-loss journey it suggests each person's portion so the planned meals fit their personal calorie target, and a checklist sends the merged, scaled shopping list to Bring! (agreed 2026-10-06).
 
 ## 2. Rules for every session
 
@@ -17,7 +17,7 @@ MealPrep Planner is a Home Assistant App that turns the household's own recipe c
 
 ## 3. Decisions
 
-All decided in the planning session on 2026-10-06.
+All decided in the planning session on 2026-10-06. Rows marked "(agreed 2026-10-06)" come from the scope change "Weight Loss Journey"; they describe the target state, and the code follows the earlier wording until the named milestone is built.
 
 | Topic | Decision |
 |---|---|
@@ -28,31 +28,36 @@ All decided in the planning session on 2026-10-06.
 | Rights | All HA users are equal: add/edit/archive recipes, plan, change settings. "Delete" = archive (restorable). |
 | Access | Ingress only, no exposed port. Requests are accepted only from the Ingress proxy `172.30.32.2`. |
 | Meal slots | Lunch + dinner, Mon–Sun (14 slots). A default slot pattern (7×2 grid) in the settings; single slots can be switched off ("kein Kochen") per week. |
-| Leftovers | One recipe per slot. No multi-day spans, no batch-prep day. |
+| Leftovers | One recipe per slot. A slot can be marked "Reste von …" an earlier slot of the same week: it shows the same recipe, its portions are added to the cooking slot, and it adds nothing to the shopping list (M14). No automatic spans, no batch-prep day. (agreed 2026-10-06) |
 | Lunch/dinner suitability | Per-recipe flags "Mittag" / "Abend" (default: both). The planner fills a slot only with matching recipes. |
 | Week | ISO week, Monday–Sunday, written `YYYY-Www`. |
-| Plan flow | Manual: "Vorschlag erstellen" → reroll / lock / replace / portions / switch off → "Bestätigen". Past slots of a confirmed plan count as cooked unless marked "ausgefallen". |
+| Plan flow | Manual: "Vorschlag erstellen" → reroll / lock / replace / switch off / adjust eaters → "Bestätigen". Past slots of a confirmed plan count as cooked unless marked "ausgefallen". Sending to Bring! is a separate button (M10). (agreed 2026-10-06) |
 | Learning | Transparent scoring: stars, per-person tag preferences that predict unrated recipes, a repeat window and a quota of new recipes. Every suggestion shows why it was picked. No implicit signals, no machine learning. |
 | Ratings | 0–5 stars. One current, editable rating per person and recipe. "Unrated" is not 0. A 0 from anyone is a veto: never suggested automatically, still plannable by hand. |
 | Rating prompt | "Wie war's?" list on the app's start page. No notifications. |
-| Planning rules | Repeat window (default 14 days, range 0–60) and new recipes per week (default 2, range 0–14), both in the settings. No tag rules, no cooking-time rules. |
-| Portions | Setting "Portionen" (default 2, range 1–12), overridable per slot. Quantities are scaled from the recipe's servings. |
+| Planning rules | Repeat window (default 14 days, range 0–60) and new recipes per week (default 2, range 0–14), both in the settings. A category rule per slot in the slot pattern (e.g. Mo–Fr Abend = Schnell), changeable per week, falling back to any recipe when none matches (M13). Recipes whose kcal fit every eater's budget are preferred (M12). No weekly category quotas, no cooking-time limits, no hard calorie limits. (agreed 2026-10-06) |
+| Portions | Cooked portions per slot = number of eaters + guests (M11), then the eaters' personal portions + guests + linked leftovers (M12, M14). Quantities are scaled from the recipe's servings. The setting "Portionen" (default 2, range 1–12) remains only as the servings fallback for imports without a yield. (agreed 2026-10-06) |
+| Household & eaters | Each HA user has "Ich esse mit" (default on); these are the participants. A new week puts all participants on every active slot; in the week view a tap on a name removes or re-adds that person for this slot. "+ Portion" adds guest portions (1 portion each). Household settings (participants, targets, canteen) are visible to and editable by every user (M11, M12). (agreed 2026-10-06) |
+| Calorie & protein targets | Each person can set a daily kcal target and a protein target (g). Both cover only the planned meals (lunch + dinner, including a canteen lunch); breakfast and snacks are not tracked. kcal drives personal portions and the planner; protein is display only (M12). (agreed 2026-10-06) |
+| Canteen lunch | Per person and day, "Kantine" marks a lunch eaten at the canteen: it counts as that person's canteen kcal (default 700, range 0–2000) toward the target, removes them from that day's planned lunch and adds nothing to shopping. Each person can set default canteen weekdays; new weeks start from them. A planned meal a person is not part of otherwise counts as 0 kcal (M12). (agreed 2026-10-06) |
+| Personal portions | Per person and day, all planned meals get the same portion factor = (kcal target − canteen kcal) ÷ sum of the meals' kcal per portion, rounded to ¼ and limited to 0.5–2. Without a target the factor is 1; if a meal of that day has no kcal, the factor is 1 and the app suggests "Nährwerte schätzen". Portions are suggestions in recipe portions, not grams (M12). (agreed 2026-10-06) |
 | Web import | Own parser (stdlib) for schema.org `Recipe` JSON-LD. Otherwise OpenGraph title/image as prefill (from M4 also AI on the page text). |
 | Video / social links | TikTok and YouTube via oEmbed (caption, thumbnail). Instagram: link only, caption pasted by hand. Ingredients and steps come from the text via AI. |
-| AI | Via HA `ai_task.generate_data`; the entity is chosen in the settings, so the app holds no API key. Used for: free text (captions, pasted text, pages without JSON-LD), clean-up of **every** import (split ingredients, map to known names, tags, lunch/dinner flags) and nutrition when the page has none (marked "geschätzt"). Not used for suggestions. If AI is off or fails, the rule-based result is kept. All AI output is validated. |
+| AI | Via HA `ai_task.generate_data`; the entity is chosen in the settings, so the app holds no API key. Used for: free text (captions, pasted text, pages without JSON-LD), clean-up of **every** import (split ingredients, map to known names, tags, lunch/dinner flags), nutrition when the page has none (marked "geschätzt") and the "Nährwerte schätzen" button (M10); from M13 it also suggests categories. Not used for suggestions. If AI is off or fails, the rule-based result is kept. All AI output is validated. (agreed 2026-10-06) |
 | Review | Every import becomes a draft that a person reviews and saves. Nothing enters the collection unreviewed. |
 | Steps | Ingredients, steps and source link are stored; the recipe page doubles as cook view. |
 | Images | Local copy of the recipe image / thumbnail, ≤ 2 MB, JPEG/PNG/WebP verified by magic bytes. |
-| Tags | Curated, editable tag list (25 defaults, §6). Import and AI pre-select from it. |
+| Tags & categories | Curated, editable tag list (25 defaults, §6). Import and AI pre-select from it. From M13, eight tags are categories: Schnell, Meal Prep, Sonntagsessen, Leicht, Proteinreich, Lunchbox, Ofengericht, Gäste; they are shown as chips and can be used as slot rules. Schnell (≤ 30 min), Leicht (≤ 500 kcal per portion) and Proteinreich (≥ 25 % of kcal from protein) are pre-ticked automatically, the others by AI or by hand. (agreed 2026-10-06) |
 | Ingredient names | Free text with suggestions of already-used names (native `<datalist>`) in the edit form. Shopping merge = same name (case-insensitive) plus unit conversion g/kg and ml/cl/dl/l. |
-| Nutrition | kcal, protein, fat, carbs per portion: from the page, else an AI estimate shown as "geschätzt". Shown per recipe and as day totals in the week view. No calorie targets. |
+| Nutrition | kcal, protein, fat, carbs per portion: from the page, else an AI estimate ("geschätzt"). A "Nährwerte schätzen" button re-estimates any recipe; page values are overwritten only after confirming (M10). Shown per recipe and as day totals in the week view; with targets, per person and day against the targets (M12). (agreed 2026-10-06) |
 | Bulk import | Paste many links (one per line, max 50) → draft queue. |
 | Phone sharing | Share sheet → HA companion app (`mobile_app.share` event, Android and iOS) → blueprint automation → HA Local To-do list "Rezept-Inbox" → the app polls it every 60 s → drafts. Copy/paste into the app also works. |
-| Bring! push | Automatic on "Bestätigen" (no preview). Bring! item = ingredient name, description = amount (e.g. "800 g"). Pantry items are skipped. |
+| Bring! push | No automatic push (M10). The button "An Bring! senden" (week view, any time after generating) opens a checklist with merged, scaled amounts; pantry items start unticked, already-sent items are shown without checkbox, items whose amount grew are pre-ticked with the difference. Ticked items are sent via HA (item = ingredient name, description = amount, e.g. "800 g"), then "Bring! öffnen" opens the Bring! app (if V9 finds a working link). (agreed 2026-10-06) |
 | Bring! duplicates | If an open item with the same name already exists, our amount is appended to its description ("1 l" → "1 l + 500 ml"). |
-| Changes after confirm | Re-confirming pushes only the difference. Items no longer needed are listed in the app for manual removal in Bring!. One-way only. |
+| Bring! re-sending | The app remembers per week what it sent; the checklist pre-ticks only new items and increases. Items no longer needed are listed for manual removal in Bring!. One-way only. (agreed 2026-10-06) |
+| Bring! recipe import | Recipes imported from public web pages get Bring!'s own import button (`https://api.getbring.com/rest/bringrecipes/deeplink?url=<source_url>&source=web`), as on Chefkoch: Bring!'s servers read the original page; the app itself is never exposed (M10). A whole-week import through this route would need a public page and is not done. (agreed 2026-10-06) |
 | Bring! notification | None. |
-| Pantry | Editable "Vorrat" name list (pre-filled, §6); its items are never pushed. No stock tracking. |
+| Pantry | Editable "Vorrat" name list (pre-filled, §6); matching items start unticked in the Bring! checklist (M10; before M10 they are never pushed). No stock tracking. (agreed 2026-10-06) |
 | HA display | REST sensor `sensor.essensplan` (state = next meal; attributes = today, tomorrow, week), re-posted every 5 min and on every plan change. |
 | Export / backup | No export/import feature. HA backups only (the app uses `backup: cold`). |
 | Backend | Python 3.13, standard library only (`http.server`, `sqlite3`, `urllib`, `html.parser`, `json`, `threading`, …). |
@@ -67,19 +72,19 @@ All decided in the planning session on 2026-10-06.
 | Fetching | Honest User-Agent `MealPrepPlanner/<version>`. If a site blocks it, report and ask before changing anything. SSRF-guarded (§5). |
 | Performance | No explicit targets. |
 | License | MIT. |
-| Repo hygiene | Public repo: no personal names, HA addresses, household entity IDs, tokens or copied third-party web pages are committed. |
+| Repo hygiene | Public repo: no personal names, HA addresses, household entity IDs, personal targets, tokens or copied third-party web pages are committed. |
 
 ## 4. Out of scope
 
 - A native or installable mobile app / PWA; appearing directly in the phone's share sheet (sharing goes through the HA companion app).
 - Reading ingredients from video, audio or images (no video download, transcription, OCR); logging in to TikTok/Instagram/YouTube; scraping beyond oEmbed.
 - Export/import files, sharing recipes with other households, importing from other recipe apps.
-- Two-way Bring! sync, automatic removal of Bring! items, Bring! notifications.
+- Automatic Bring! pushes (from M10), two-way Bring! sync, automatic removal of Bring! items, Bring! notifications; sending the whole week through Bring!'s own import screen; any public endpoint for Bring!. (agreed 2026-10-06)
 - Inventory/stock tracking with amounts (only the pantry name list).
-- Calorie or nutrition targets, diet plans, allergen management, nutrients beyond kcal/protein/fat/carbs.
-- Planning rules beyond repeat window and new-recipe quota (no tag limits, no cooking-time limits).
+- Calculating targets from body data (BMR/TDEE), diet plans, allergen management, nutrients beyond kcal/protein/fat/carbs, nutrient databases (BLS, Open Food Facts); protein in the planner (display only); weight tracking or charts and logs of what was actually eaten (weight already lives in HA). (agreed 2026-10-06)
+- Weekly category quotas, cooking-time limits, hard calorie limits in the planner. (agreed 2026-10-06)
 - Implicit learning signals, machine-learning models, AI-based suggestions, AI recipe ideas outside the collection.
-- Breakfast/snacks, multi-day leftovers, batch-prep days, per-person portion factors.
+- Breakfast/snacks, automatic multi-day spans, batch-prep days, manual per-person portion overrides, canteen for dinner. (agreed 2026-10-06)
 - Scheduled automatic plan generation; push notifications of any kind.
 - Access outside Ingress (LAN port, own login), roles and permissions.
 - HA calendar integration, a custom integration, HA entities other than `sensor.essensplan`.
@@ -100,16 +105,16 @@ All decided in the planning session on 2026-10-06.
  "Home Assistant" ---------------> event mobile_app.share
                                    -> blueprint automation
                                    -> todo "Rezept-Inbox"  <-------------- worker: poll every 60 s
-                                   todo <Bring! list>      <-------------- push on "Bestätigen"
+                                   todo <Bring! list>      <-------------- ticked checklist items (M10)
                                      -> Bring! cloud -> Bring! apps
-                                   ai_task.generate_data   <-------------- import clean-up / free text
-                                     -> LLM provider
+                                   ai_task.generate_data   <-------------- import clean-up, free text,
+                                     -> LLM provider                       "Nährwerte schätzen"
                                    sensor.essensplan       <-------------- worker: every 5 min + on change
                                    (all via REST /core/api + Supervisor token)
 
-                                                                           importer.fetch (SSRF-guarded)
-                                                                             -> recipe sites (JSON-LD)
-                                                                             -> TikTok / YouTube oEmbed
+ "In Bring! importieren" (link on a recipe page, M10)                      importer.fetch (SSRF-guarded)
+   -> api.getbring.com deeplink -> Bring! servers read the                   -> recipe sites (JSON-LD)
+      ORIGINAL public recipe page (e.g. Chefkoch), never the app             -> TikTok / YouTube oEmbed
                                                                              -> recipe images
 ```
 
@@ -117,13 +122,14 @@ All decided in the planning session on 2026-10-06.
 
 | State | Owner, location | Notes |
 |---|---|---|
-| Recipes, ingredients, tags, ratings, users, plans, slots, settings, import jobs, pantry, pushed items | App, SQLite `/data/mealprep.db` | Included in HA backups (`backup: cold` stops the app briefly, so the DB file is consistent). |
+| Recipes, ingredients, tags/categories, ratings, users (incl. participation, targets, canteen defaults), plans, slots, eaters, canteen days, settings, import jobs, pantry, pushed items | App, SQLite `/data/mealprep.db` | Included in HA backups (`backup: cold` stops the app briefly, so the DB file is consistent). |
 | Recipe images | App, `/data/images/<sha256>.<ext>` | Content-addressed, never overwritten. |
 | Identity and login | HA | The app trusts Ingress headers only from `172.30.32.2`. |
 | Shopping list contents | Bring! (via the HA todo entity) | The app only writes and remembers what it pushed per week. |
 | Shared links waiting for import | HA Local To-do "Rezept-Inbox" | The app removes an item after creating its import job. |
 | AI provider and its configuration | HA `ai_task` entity | The app only calls it. |
 | `sensor.essensplan` | Derived; re-posted by the app | Lost on HA restart until the next post (≤ 5 min). |
+| Weight | HA (existing weight sensors) | Not used by the app (agreed 2026-10-06). |
 | UI language override | App (`users.lang`) | Otherwise browser language. |
 | UI state | Browser memory only | No localStorage. |
 
@@ -133,7 +139,8 @@ All decided in the planning session on 2026-10-06.
 - **App → HA:** REST API `http://supervisor/core/api` with `SUPERVISOR_TOKEN` (needs `homeassistant_api: true`). Service responses via `?return_response`. Module `ha.py` is the only place that talks to HA.
 - **HA → app:** only Ingress requests. No callbacks; the inbox is polled.
 - **App → internet:** only through `importer.fetch` (SSRF guard and limits, see below).
-- **Background work:** one worker thread (`worker.py`) processes import jobs one at a time, polls the inbox (M5) and posts the sensor (M9). HTTP handlers never wait for AI or page fetches.
+- **Phone → Bring! (per-recipe import, M10):** a plain link to Bring!'s deeplink service carrying the recipe's public `source_url`; Bring!'s servers fetch that original page. The app is neither contacted nor exposed.
+- **Background work:** one worker thread (`worker.py`) processes import jobs one at a time, polls the inbox (M5) and posts the sensor (M9). HTTP handlers never wait for page fetches or import AI; only "Nährwerte schätzen" (M10) waits for its AI answer (≤ 60 s).
 
 ### Runtime modes
 
@@ -151,18 +158,18 @@ All decided in the planning session on 2026-10-06.
 ### Trust boundaries
 
 - **Ingress requests:** source IP must be `172.30.32.2` (prod); `X-Remote-User-Id` must match `^[A-Za-z0-9_-]{1,64}$`, names ≤ 100 chars. Missing or invalid → 403 `forbidden`.
-- **API input:** JSON only, ≤ 1 MB; every field validated (`recipes.validate_draft`, settings validators); errors → 400 `invalid_field` with the field name. Week IDs match `^\d{4}-W\d{2}$` and must exist.
+- **API input:** JSON only, ≤ 1 MB; every field validated (`recipes.validate_draft`, settings and household validators); errors → 400 `invalid_field` with the field name. Week IDs match `^\d{4}-W\d{2}$` and must exist.
 - **Fetching (`importer.check_url` + `fetch`):** only `http`/`https`; no userinfo; port 80/443 only; host must resolve exclusively to global IPs (`ipaddress.ip_address(a).is_global`), checked again on every redirect (max 5); timeout 15 s; HTML ≤ 3 MB, images ≤ 2 MB, oEmbed JSON ≤ 256 KB; no cookies. Residual DNS-rebinding risk is accepted (only authenticated household users submit URLs).
 - **Images:** accepted only if magic bytes are JPEG (`FF D8 FF`), PNG (`89 50 4E 47`) or WebP (`RIFF....WEBP`); stored as `<sha256>.<ext>`; served only for names matching `^[0-9a-f]{64}\.(jpg|png|webp)$`.
 - **Recipe pages, captions, AI output, HA responses:** untrusted data. Parsed defensively; AI output goes through `ai.validate_ai_output` and then `validate_draft`; a person reviews every draft. AI has no tools/actions; its text is never rendered as HTML.
-- **Frontend:** data only via `textContent`/attributes; external links only `http(s)` with `rel="noopener noreferrer"`. Response headers: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; frame-ancestors 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
+- **Frontend:** data only via `textContent`/attributes; external links (source pages, Bring! deeplinks) only `http(s)`, URL-encoded, with `rel="noopener noreferrer"`. Response headers: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; frame-ancestors 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 - **Secrets:** the HA token exists only in environment variables; nothing personal in the repo.
 
 ### Verified external behaviour
 
-Checked in the planning session (2026-10-06): HA 2026.9 on HA OS 18.1 (KVM, amd64) with Supervisor; services `todo.add_item` (item, description), `todo.update_item` (item, rename, status, description), `todo.remove_item`, `todo.get_items` exist and the Bring! list supports create/update/delete/description; `ai_task.generate_data` takes `task_name`, `instructions`, `entity_id`, `structure`, `attachments`; `calendar` has no delete service; both companion apps fire `mobile_app.share` (Android: `url`, `text`, `subject`, `caller`; iOS: `url`, `text`, `entered`); the REST API supports `?return_response`; Ingress sends `X-Remote-User-Id/-Name/-Display-Name`.
+Checked in the planning session (2026-10-06): HA 2026.9 on HA OS 18.1 (KVM, amd64) with Supervisor; services `todo.add_item` (item, description), `todo.update_item` (item, rename, status, description), `todo.remove_item`, `todo.get_items` exist and the Bring! list supports create/update/delete/description; `ai_task.generate_data` takes `task_name`, `instructions`, `entity_id`, `structure`, `attachments`; `calendar` has no delete service; both companion apps fire `mobile_app.share` (Android: `url`, `text`, `subject`, `caller`; iOS: `url`, `text`, `entered`); the REST API supports `?return_response`; Ingress sends `X-Remote-User-Id/-Name/-Display-Name`. Bring!'s recipe import is pull-based: Bring!'s servers fetch the given URL, so it only works for public pages (Mealie documents the same and uses `https://api.getbring.com/rest/bringrecipes/deeplink?url=<url>&source=web`).
 
-To verify on the device in M1 (fill in the result, then later milestones follow it):
+To verify on the device (V1–V7 in M1, V8–V9 in M10; fill in the result, then later milestones follow it):
 
 | # | Question | Result |
 |---|---|---|
@@ -173,6 +180,8 @@ To verify on the device in M1 (fill in the result, then later milestones follow 
 | V5 | Shape of `todo.get_items` response via REST `?return_response` | `{"service_response": {"<entity_id>": {"items": [{"summary", "uid", "status", "description"}]}}}`; `description` is `""` when empty (checked via HA MCP, 2026-10-06). |
 | V6 | `ai_task.generate_data` via REST: variant A (`structure` with a multi-value text field) and/or variant B (JSON demanded in `instructions`) works? Typical duration? | Both work, ~3 s each. A: `service_response.data` is a dict. B: `service_response.data` is a string wrapped in a ```` ```json ```` fence. M4 uses **B** (nested draft shape; fence stripped before `json.loads`) (agreed 2026-10-06; checked via HA MCP). |
 | V7 | `POST /api/states/sensor.essensplan` from the app works | open |
+| V8 | The Bring! import link with a public Chefkoch URL opens Bring!'s import screen from the HA companion app (Android, iOS)? Do `baseQuantity` / `requestedQuantity` scale the amounts? | open |
+| V9 | Which link reliably opens the Bring! app from the HA companion app (Android, iOS)? If none, there is no "Bring! öffnen" button. | open |
 
 ## 6. Data format
 
@@ -180,7 +189,7 @@ No files are shared or exported. Persistent data lives in SQLite; the schema is 
 
 ### SQLite schema
 
-Connection settings: `PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;` One connection per request/thread. Timestamps are ISO 8601 local time strings.
+Connection settings: `PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;` One connection per request/thread. Timestamps are ISO 8601 local time strings. Columns added with `ALTER TABLE` (from migration 7) carry no `CHECK`; their ranges are validated in code.
 
 ```sql
 -- Migration 1 (M1)
@@ -294,6 +303,44 @@ CREATE TABLE pushed_items (
   pushed_at TEXT NOT NULL,
   PRIMARY KEY (week, name, unit_key)
 );
+-- Migration 7 (M11)
+ALTER TABLE users ADD COLUMN eats INTEGER NOT NULL DEFAULT 1;           -- "Ich esse mit"
+ALTER TABLE plan_slots ADD COLUMN guests INTEGER NOT NULL DEFAULT 0;    -- guest portions, 0–12
+CREATE TABLE slot_eaters (                  -- row = person eats this slot
+  week    TEXT NOT NULL,
+  day     INTEGER NOT NULL,
+  meal    TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  PRIMARY KEY (week, day, meal, user_id),
+  FOREIGN KEY (week, day, meal) REFERENCES plan_slots(week, day, meal) ON DELETE CASCADE
+);
+INSERT INTO slot_eaters (week, day, meal, user_id)   -- existing plans are test data (agreed 2026-10-06)
+  SELECT s.week, s.day, s.meal, u.id FROM plan_slots s CROSS JOIN users u WHERE s.active = 1;
+ALTER TABLE plan_slots DROP COLUMN portions;
+
+-- Migration 8 (M12)
+ALTER TABLE users ADD COLUMN kcal_target INTEGER;                       -- 300–5000, NULL = none
+ALTER TABLE users ADD COLUMN protein_target_g INTEGER;                  -- 10–400, NULL = none
+ALTER TABLE users ADD COLUMN canteen_kcal INTEGER NOT NULL DEFAULT 700; -- 0–2000
+ALTER TABLE users ADD COLUMN canteen_days TEXT NOT NULL DEFAULT '[]';   -- JSON weekdays 0–6
+CREATE TABLE plan_canteen (                 -- row = person eats at the canteen that day
+  week    TEXT NOT NULL REFERENCES plans(week),
+  day     INTEGER NOT NULL CHECK (day BETWEEN 0 AND 6),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  PRIMARY KEY (week, day, user_id)
+);
+
+-- Migration 9 (M13)
+ALTER TABLE tags ADD COLUMN category INTEGER NOT NULL DEFAULT 0;        -- 1 = planning category (chip, slot rule)
+INSERT OR IGNORE INTO tags (name) VALUES
+  ('Meal Prep'), ('Sonntagsessen'), ('Proteinreich'), ('Lunchbox'), ('Ofengericht'), ('Gäste');
+UPDATE tags SET category = 1 WHERE name IN
+  ('Schnell', 'Meal Prep', 'Sonntagsessen', 'Leicht', 'Proteinreich', 'Lunchbox', 'Ofengericht', 'Gäste');
+ALTER TABLE plan_slots ADD COLUMN rule_tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL;   -- category rule
+
+-- Migration 10 (M14)
+ALTER TABLE plan_slots ADD COLUMN leftover_day INTEGER;                 -- "Reste von": source slot
+ALTER TABLE plan_slots ADD COLUMN leftover_meal TEXT;
 ```
 
 ### Recipe draft (format_version 1)
@@ -402,26 +449,39 @@ Parser rules (`ingredients.parse_line`), in this order:
 | `bring_entity` | string | `null` | existing `todo.*` entity | M1 |
 | `ai_enabled` | bool | `true` | – | M1 |
 | `ai_entity` | string | `null` | existing `ai_task.*` entity | M1 |
-| `default_portions` | int | 2 | 1–12 | M2 |
+| `default_portions` | int | 2 | 1–12; servings fallback for imports without a yield (until M11 also the default slot portions) | M2 |
 | `inbox_entity` | string | `null` | existing `todo.*` entity, ≠ `bring_entity` | M5 |
 | `slot_pattern` | 14 × bool | all `true` | index = day × 2 + (0 lunch, 1 dinner) | M7 |
 | `repeat_window_days` | int | 14 | 0–60 | M7 |
 | `new_per_week` | int | 2 | 0–14 | M7 |
+| `slot_rules` | 14 × tag_id \| `null` | all `null` | each a category tag (index as `slot_pattern`); unknown ids read as `null` | M13 |
 
 Defaults live in code; the table stores only changed values.
+
+Per-person values live in the `users` table:
+
+| Column | Default | Validation | From |
+|---|---|---|---|
+| `eats` | 1 | 0/1 ("Ich esse mit") | M11 |
+| `kcal_target` | `null` | `null` or 300–5000 (kcal for the planned meals of a day) | M12 |
+| `protein_target_g` | `null` | `null` or 10–400 | M12 |
+| `canteen_kcal` | 700 | 0–2000 | M12 |
+| `canteen_days` | `[]` | JSON list of distinct weekdays 0–6 | M12 |
 
 ### Default lists
 
 - **Tags (25):** Fleisch, Geflügel, Fisch, Vegetarisch, Vegan, Nudeln, Reis, Kartoffeln, Hülsenfrüchte, Suppe, Eintopf, Salat, Auflauf, Pfanne, Bowl, Deutsch, Italienisch, Asiatisch, Mexikanisch, Orientalisch, Indisch, Schnell, Leicht, Low Carb, Deftig.
+- **Categories (M13, `category = 1`):** Schnell, Meal Prep (vorkochbar, 2–3 Tage haltbar), Sonntagsessen (aufwendiger, Genuss), Leicht, Proteinreich, Lunchbox (kalt/transportabel), Ofengericht (wenig Aufwand), Gäste; migration 9 adds the six that are not default tags yet.
+- **Automatic categories (M13)** (constants in code, applied as pre-ticks to drafts and nutrition guesses, never silently on save): Schnell if `total_minutes` ≤ 30; Leicht if `kcal` ≤ 500; Proteinreich if `protein_g` × 4 ≥ 0.25 × `kcal`.
 - **Pantry (11):** Salz, Pfeffer, Zucker, Mehl, Wasser, Öl, Olivenöl, Rapsöl, Sonnenblumenöl, Essig, Paprikapulver.
 
-### Suggestion reason (`plan_slots.reason`, M7)
+### Suggestion reason (`plan_slots.reason`, M7; extended in M12/M13)
 
 ```json
 {"kind": "predicted", "score": 3.9, "tags": ["Nudeln", "Italienisch"]}
 ```
 
-`kind`: `rated` (at least one rating), `predicted` (no rating, cooked before), `new` (no rating, never cooked), `manual` (set by hand), `none` (no candidate). `score` = household score (1 decimal). `tags` = up to 3 recipe tags with the highest affinity for the household. The frontend turns this into text via i18n.
+`kind`: `rated` (at least one rating), `predicted` (no rating, cooked before), `new` (no rating, never cooked), `manual` (set by hand), `none` (no candidate). `score` = household score (1 decimal). `tags` = up to 3 recipe tags with the highest affinity for the household. M13 adds `rule` (the slot's category or `null`) and `rule_met` (`false` when the planner had to fall back to any recipe); M12 adds `fit`: `ok`, `poor` (some eater would need a factor outside 0.75–1.5) or `unknown` (recipe without kcal). The frontend turns this into text via i18n.
 
 ### Sensor payload (M9)
 
@@ -461,16 +521,16 @@ Mobile-first, works in the HA companion app and desktop browsers. Navigation bar
 
 | Route | Page | What it offers | From |
 |---|---|---|---|
-| `#/` | Start / Heute | M0: status (version, greeting). M2–M8: redirects to `#/rezepte`. M9: today's and tomorrow's lunch/dinner (tap → recipe with the slot's portions), "Wie war's?" list with star widget, quick "Link hinzufügen" field. | M0, M9 |
-| `#/woche/<YYYY-Www>` | Woche | Week picker (prev/next, "Nächste Woche"), per day lunch + dinner: image, title, reason text, actions 🎲 reroll, 🔒 lock, ✏️ replace (search dialog), portions −/+, ⏸ switch off; day totals (≈ kcal); "Vorschlag erstellen", "Bestätigen"; after confirm: "ausgefallen" toggle on past slots. M8: push result panel ("gesendet / aktualisiert / Vorrat / nicht mehr benötigt / fehlgeschlagen"), "Erneut senden". | M7, M8 |
-| `#/woche/<YYYY-Www>/einkauf` | Einkauf | Computed shopping list with status per item. Read-only. | M8 |
-| `#/rezepte` | Rezepte | Search, tag filter, "Archiv" toggle, cards (image, title, tags, time). M6: household Ø, own stars, sort by score / title / newest, filter "von mir unbewertet". | M2, M3, M6 |
-| `#/rezepte/<id>` | Rezept (cook view) | Image, portions stepper (scales ingredients), ingredients, steps, nutrition (+ "geschätzt" badge), source link, edit, archive/restore. M6: stars per person, own star widget (1–5 + "🚫 0 Nie wieder", tap again to clear), "Prognose für dich". | M2, M6 |
-| `#/rezepte/neu`, `#/rezepte/<id>/bearbeiten` | Edit form | Title, servings, time, Mittag/Abend, tag checkboxes, ingredient rows (amount, unit select, name with `<datalist>`, note; add/remove), "Zutaten einfügen" textarea → parsed rows, steps (add/remove), nutrition, source URL. | M2 |
+| `#/` | Start / Heute | M0: status (version, greeting). M2–M8: redirects to `#/rezepte`. M9: today's and tomorrow's lunch/dinner (tap → recipe with the slot's portions), "Wie war's?" list with star widget, quick "Link hinzufügen" field. M12: "deine Portion" (or "Kantine") per meal. | M0, M9, M12 |
+| `#/woche/<YYYY-Www>` | Woche | Week picker (prev/next, "Nächste Woche"), per day lunch + dinner: image, title, reason text, actions 🎲 reroll, 🔒 lock, ✏️ replace (search dialog), portions −/+, ⏸ switch off; day totals (≈ kcal); "Vorschlag erstellen", "Bestätigen"; after confirm: "ausgefallen" toggle on past slots. M8: push result panel ("gesendet / aktualisiert / Vorrat / nicht mehr benötigt / fehlgeschlagen"), "Erneut senden". M10: "Bestätigen" only confirms; "🛒 An Bring! senden" opens the checklist (push panel and "Erneut senden" move there). M11: eater chips (tap = remove/re-add) and "+ Portion" for guests replace the portions stepper; cooked portions shown. M12: portion per eater ("1¼"), "Kantine" toggle per person and day, per-person day totals of kcal (incl. canteen) and protein against the targets (green within ±10 %, amber outside), fit hint, "Nährwerte schätzen" hint on days without kcal. M13: category rule per slot, "Kategorie nicht erfüllt". M14: "Reste von …" select. | M7, M8, M10–M14 |
+| `#/woche/<YYYY-Www>/einkauf` | Einkauf | Computed shopping list with status per item. Read-only. M10: checklist — checkbox per item with status (neu / mehr: +Differenz / Vorrat, unticked), already-sent items without checkbox; "Ausgewählte senden (N)"; result panel (gesendet / aktualisiert / fehlgeschlagen) with "Erneut senden" and "Bring! öffnen" (if V9 found a link); items no longer needed. | M8, M10 |
+| `#/rezepte` | Rezepte | Search, tag filter, "Archiv" toggle, cards (image, title, tags, time). M6: household Ø, own stars, sort by score / title / newest, filter "von mir unbewertet". M13: category chips and category filter. | M2, M3, M6, M13 |
+| `#/rezepte/<id>` | Rezept (cook view) | Image, portions stepper (scales ingredients), ingredients, steps, nutrition (+ "geschätzt" badge), source link, edit, archive/restore. M6: stars per person, own star widget (1–5 + "🚫 0 Nie wieder", tap again to clear), "Prognose für dich". M10: "In Bring! importieren" for recipes from public web pages. M13: category chips. | M2, M6, M10, M13 |
+| `#/rezepte/neu`, `#/rezepte/<id>/bearbeiten` | Edit form | Title, servings, time, Mittag/Abend, tag checkboxes, ingredient rows (amount, unit select, name with `<datalist>`, note; add/remove), "Zutaten einfügen" textarea → parsed rows, steps (add/remove), nutrition, source URL. M10: "Nährwerte schätzen" (asks before overwriting page values). M13: category chips. | M2, M10, M13 |
 | `#/import` | Import | Link field, "Mehrere Links" textarea (≤ 50), job list (wartet / läuft / prüfen / fehlgeschlagen) refreshed every 3 s while jobs run. M4: "Rezepttext einfügen" field. M5: inbox badge on jobs; nav badge with number of drafts to review. | M3–M5 |
-| `#/import/<job-id>` | Draft review | Edit form prefilled from the draft, warnings on top, image preview; Speichern / Verwerfen / Erneut versuchen. M4: "Caption einfügen" re-runs AI on pasted text. | M3, M4 |
-| `#/einstellungen` | Einstellungen | M1: language (Automatisch/Deutsch/English), Bring! list, AI on/off + AI entity, link to Systemcheck. M2: default portions, tag editor. M5: inbox list. M7: 7×2 slot pattern grid, repeat window, new per week. M8: pantry editor. | M1–M8 |
-| `#/systemcheck` | Systemcheck | Buttons for checks `ha`, `bring` (writes a test item to Bring!), `ai`, `sensor`; results shown as text. | M1 |
+| `#/import/<job-id>` | Draft review | Edit form prefilled from the draft, warnings on top, image preview; Speichern / Verwerfen / Erneut versuchen. M4: "Caption einfügen" re-runs AI on pasted text. M10: "Nährwerte schätzen". | M3, M4, M10 |
+| `#/einstellungen` | Einstellungen | M1: language (Automatisch/Deutsch/English), Bring! list, AI on/off + AI entity, link to Systemcheck. M2: default portions, tag editor. M5: inbox list. M7: 7×2 slot pattern grid, repeat window, new per week. M8: pantry editor. M11: "Haushalt" ("Ich esse mit" per user). M12: per user kcal target, protein target, canteen kcal, canteen weekdays. M13: category per cell of the slot pattern grid, "Kategorie" toggle in the tag editor. | M1–M8, M11–M13 |
+| `#/systemcheck` | Systemcheck | Buttons for checks `ha`, `bring` (writes a test item to Bring!), `ai`, `sensor`; results shown as text. M10: Bring! link tests (V8/V9). | M1, M10 |
 
 ### JSON API (all paths relative, prefix `api/`)
 
@@ -484,7 +544,7 @@ Mobile-first, works in the HA companion app and desktop browsers. Navigation bar
 | `GET api/recipes` | list; `q`, `tag`, `archived=0\|1`; M6: `sort=score\|title\|new`, `filter=unrated_by_me` | M2 |
 | `POST api/recipes`, `GET/PUT api/recipes/<id>` | create / read / update | M2 |
 | `POST api/recipes/<id>/archive`, `…/restore` | archive / restore | M2 |
-| `GET/POST api/tags`, `PUT/DELETE api/tags/<id>` | tag editor (delete removes the tag from recipes) | M2 |
+| `GET/POST api/tags`, `PUT/DELETE api/tags/<id>` | tag editor (delete removes the tag from recipes); M13: `category` flag | M2, M13 |
 | `GET api/ingredient-names` | known names, sorted case-insensitively | M2 |
 | `GET api/units` | canonical units with plural forms `[{unit, plural}]` for the edit form and amount display (added in M2) | M2 |
 | `POST api/parse-ingredients` | `{text}` → parsed ingredient list | M2 |
@@ -493,14 +553,17 @@ Mobile-first, works in the HA companion app and desktop browsers. Navigation bar
 | `GET api/imports?status=`, `GET api/imports/<id>` | job list (newest first, ≤ 100) / job with draft | M3 |
 | `POST api/imports/<id>/save`, `…/discard`, `…/retry` | save draft as recipe / discard / requeue | M3 |
 | `POST api/imports/<id>/text` | `{text}` → re-run AI on a pasted caption, keeping link and image | M4 |
+| `POST api/nutrition/estimate` | `{draft}` (title, servings, ≥ 1 ingredient) → `{nutrition}` (M13: + `suggested_tags`) via AI; nothing is saved; AI off or failed → 502 `ai_failed` | M10 |
 | `PUT api/recipes/<id>/rating` | `{stars: 0–5 \| null}` for the current user | M6 |
-| `GET api/plans/<week>` | plan with slots, reasons, day totals; created as draft from `slot_pattern` if missing | M7 |
+| `GET api/plans/<week>` | plan with slots, reasons, day totals; created as draft from `slot_pattern` if missing; M11: eaters, guests, cooked portions; M12: portions per eater, canteen, per-person totals | M7, M11, M12 |
 | `POST api/plans/<week>/generate` | fill all active, unlocked slots | M7 |
-| `POST api/plans/<week>/slots/<day>/<meal>` | `{action: reroll\|set\|clear\|lock\|unlock\|activate\|deactivate\|portions\|skip\|unskip, recipe_id?, portions?}` | M7 |
-| `POST api/plans/<week>/confirm` | confirm; from M8 also pushes to Bring! | M7, M8 |
-| `GET api/plans/<week>/shopping`, `POST api/plans/<week>/push` | list + pushed + no longer needed / push remaining difference | M8 |
+| `POST api/plans/<week>/slots/<day>/<meal>` | `{action: reroll\|set\|clear\|lock\|unlock\|activate\|deactivate\|portions\|skip\|unskip, recipe_id?, portions?}`; M11: `portions` replaced by `eater {user_id, on}` and `guests {n}`; M13: `rule {tag_id \| null}`; M14: `leftover {from_day, from_meal} \| null` | M7, M11, M13, M14 |
+| `POST api/plans/<week>/confirm` | confirm; M8 also pushed to Bring!, from M10 it only confirms | M7, M8, M10 |
+| `GET api/plans/<week>/shopping`, `POST api/plans/<week>/push` | list + pushed + no longer needed / push remaining difference; M10: checklist with statuses, `push {keys}` for draft and confirmed plans | M8, M10 |
 | `GET/PUT api/pantry` | pantry names (each 1–100 chars, ≤ 300 names) | M8 |
-| `GET api/today` | today, tomorrow, "Wie war's?" list | M9 |
+| `GET api/household`, `PUT api/household/<user_id>` | `[{user_id, display_name, eats}]` / `{eats}` (M11); + `kcal_target`, `protein_target_g`, `canteen_kcal`, `canteen_days` (M12) | M11, M12 |
+| `POST api/plans/<week>/canteen` | `{day, user_id, on}` | M12 |
+| `GET api/today` | today, tomorrow, "Wie war's?" list; M12: own portion / canteen | M9, M12 |
 
 ### CLI and environment
 
@@ -542,12 +605,13 @@ MealPrepPlanner/                      git repo = HA app repository
     │   ├── db.py                     connection, migrations, settings, users            (M1)
     │   ├── ha.py                     HA REST client                                     (M1)
     │   ├── ingredients.py            parse, scale, format, aggregate                    (M2, M8)
-    │   ├── recipes.py                validate_draft, recipe/tag queries                 (M2)
+    │   ├── recipes.py                validate_draft, recipe/tag queries, categories, Bring! import link (M2, M10, M13)
     │   ├── importer.py               check_url, fetch, JSON-LD/OpenGraph/oEmbed, images (M3, M4)
     │   ├── worker.py                 background loop: jobs, inbox, sensor               (M3, M5, M9)
-    │   ├── ai.py                     ai_task prompts + output validation                (M4)
-    │   ├── planner.py                prediction, plan generation, sensor payload        (M6, M7, M9)
-    │   └── shopping.py               shopping list, diff, Bring! push                   (M8)
+    │   ├── ai.py                     ai_task prompts, nutrition guess, output validation (M4, M10, M13)
+    │   ├── planner.py                prediction, plan generation, personal portions, sensor payload (M6, M7, M9, M12–M14)
+    │   ├── plans.py                  week plans: load/store, slot actions, today page     (M7, M9, M11, M12, M14)
+    │   └── shopping.py               shopping list, diff, Bring! checklist push          (M8, M10)
     ├── static/
     │   ├── index.html
     │   ├── app.js                    ES modules allowed, no build step
@@ -575,6 +639,14 @@ MealPrepPlanner/                      git repo = HA app repository
 - [ ] M7 Week planner
 - [ ] M8 Shopping list and Bring! push
 - [ ] M9 Today page, rating prompt and HA sensor
+
+Scope change "Weight Loss Journey" (agreed 2026-10-06):
+
+- [ ] M10 Bring! under control and nutrition guess
+- [ ] M11 Household and eaters
+- [ ] M12 Weight loss: targets, canteen and personal portions
+- [ ] M13 Categories and slot rules
+- [ ] M14 Leftovers ("Reste von …")
 
 Every milestone: bump `VERSION` (and from M1 `config.yaml`) to `0.<n>.0`; every new UI string goes into both `de.json` and `en.json`; all existing tests keep passing. "(manual)" marks checks done by hand, "(manual, HA)" on the HA device, "(manual, phone)" on a phone.
 
@@ -749,6 +821,8 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 
 ### M7 – Week planner
 
+*Changed later (agreed 2026-10-06): per-slot portions become eaters + guests in M11; per-person day totals against targets come in M12.*
+
 **Build**
 - Migration 5 (`plans`, `plan_slots`). Settings `slot_pattern`, `repeat_window_days`, `new_per_week`.
 - `planner.py`: `week_dates(week) -> [date × 7]`, `week_of(date) -> "YYYY-Www"`, `history(conn, exclude_week) -> [(recipe_id, date)]` (non-skipped, filled slots of other confirmed plans), `generate(plan, recipes, ratings, users, history, settings, rng)`, `reroll(plan, day, meal, …)`. Algorithm:
@@ -774,6 +848,8 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 - [x] All tests pass.
 
 ### M8 – Shopping list and Bring! push
+
+*Changed later (agreed 2026-10-06): M10 removes the push on "Bestätigen"; sending goes through the checklist.*
 
 Follow the results V3–V5 in §5; if they contradict this description, ask before deviating.
 
@@ -811,20 +887,157 @@ Follow the results V3–V5 in §5; if they contradict this description, ask befo
 - [ ] After an HA restart, the sensor is back within 5 min (manual, HA).
 - [x] All tests pass.
 
+### M10 – Bring! under control and nutrition guess
+
+Goal: nothing reaches Bring! unless a person ticks it; Chefkoch-style Bring! import for web recipes; nutrition estimates on demand (agreed 2026-10-06).
+
+**Build**
+- `server.py`: `POST api/plans/<week>/confirm` only confirms (no push, no `push` key in the response). `POST api/plans/<week>/push` takes `{keys: […]}` (1–500 keys of the current checklist; anything else → 400 `invalid_field` `keys`) and works for draft and confirmed plans.
+- `shopping.py`:
+  - `build_list` keeps pantry items, flagged as pantry, instead of dropping them.
+  - `view(conn, week)` returns the checklist: `items: [{key, name, note, status, checked}]` with `key` = name case-folded and `status` `new` (never sent; checked), `more` (sent before, more needed now; `note` = the difference; checked), `pantry` (name in the pantry list, not sent yet; `note` = full amount; unchecked) or `sent` (nothing new; shown without checkbox); plus `no_longer_needed` as today.
+  - `push(conn, week, keys)`: same logic as today (open items, update by `uid`, partial-failure recording, `_lower`), but only for the given keys; a ticked pantry item is sent with its full amount and recorded in `pushed_items` like any other item. Result `{added, updated, failed, no_longer_needed}`.
+- `ai.py`: `estimate_nutrition(draft, entity) -> nutrition`: own prompt (title, servings, ingredient lines; answer `{kcal, protein_g, fat_g, carbs_g}` per portion) through `_ask`, validated with the §6 ranges, `source: "ai"`; AI off, HA error or unusable answer → the endpoint answers 502 `ai_failed`.
+- API `POST api/nutrition/estimate` (§7); it saves nothing.
+- `recipes.py`: `bring_import_url(source_url, servings=None, portions=None) -> str` = `https://api.getbring.com/rest/bringrecipes/deeplink?url=<url-encoded>&source=web`, plus `&baseQuantity=<servings>&requestedQuantity=<portions>` only if V8 confirms these parameters.
+- UI:
+  - Week view: "Bestätigen" only confirms; "Erneut senden", its hint and the push panel leave the week view; new button "🛒 An Bring! senden" (enabled once a slot is filled) → `#/woche/<week>/einkauf`.
+  - `#/woche/<week>/einkauf` becomes the checklist (§7): "Ausgewählte senden (N)", result panel, "Erneut senden" for failed items, "Bring! öffnen" if V9 found a link, items no longer needed.
+  - Recipe page: "In Bring! importieren" for `source_kind = web` recipes with a `source_url` (`rel="noopener noreferrer"`).
+  - Edit form and draft review: "Nährwerte schätzen" (asks first when the current values have `source: page`; fills the four fields, marked "geschätzt").
+  - Systemcheck: Bring! link tests (a field for a public recipe URL → the deeplink with and without `&baseQuantity=4&requestedQuantity=2`; candidate links that open the Bring! app, looked up by the session).
+- After the phone checks: fill V8 and V9 in §5.
+
+**Tests added**
+- `test_shopping.py`: checklist statuses and default ticks (new, more with difference, pantry case-insensitive, sent); push only for the given keys; ticked pantry item sent and recorded; push on a draft plan.
+- `test_server.py`: confirm no longer calls HA and returns no `push`; `push {keys}` validation (missing, empty, unknown key).
+- `test_ai.py`: `estimate_nutrition` with a valid answer; out-of-range values dropped; non-JSON answer and AI off → `ai_failed`; the endpoint saves nothing.
+- `test_recipes.py`: `bring_import_url` encodes URLs with `?`, `&`, `#` and umlauts.
+
+**Acceptance**
+- [ ] "Bestätigen" sends nothing to Bring! (manual).
+- [ ] After "Vorschlag erstellen", "An Bring! senden" shows the checklist with pantry items unticked; sending the ticked items puts them into Bring! with amounts as notes, visible on the phone within 1 min (manual, phone).
+- [ ] After replacing a meal, the checklist ticks only new items and increases; items already sent have no checkbox (manual).
+- [ ] "In Bring! importieren" on an imported Chefkoch recipe opens Bring!'s import screen on Android and iOS; V8 filled (manual, phone).
+- [ ] "Bring! öffnen" opens the Bring! app, or V9 records that no link works and the button is left out (manual, phone).
+- [ ] "Nährwerte schätzen" fills the four values of a manual recipe within 60 s; on a Chefkoch recipe it asks before overwriting (manual).
+- [ ] All tests pass.
+
+### M11 – Household and eaters
+
+**Build**
+- Migration 7 (§6): `users.eats`, `plan_slots.guests`, table `slot_eaters` (existing plans: every user becomes eater of every active slot), `plan_slots.portions` dropped. Existing plans are test data (agreed 2026-10-06).
+- `db.py`: `household(conn) -> [{user_id, display_name, eats}]`, `set_household(conn, user_id, patch)` (validates `eats` as bool; unknown user → 404 `not_found`).
+- `plans.py`: `load_plan` creates new weeks with every participant (`eats = 1`) on every active slot and `guests = 0`; slots carry `eaters` (user ids) and `guests`; `cooked_portions(slot)` = number of eaters + guests. `ACTIONS`: `portions` removed; new `eater {user_id, on}` (existing user, active slot only) and `guests {n}` (0–12); `activate` puts all participants on the slot. `view` returns per slot `eaters [{user_id, display_name}]`, `guests`, `cooked_portions`; `dated_slots` and `today_view` return cooked portions instead of `portions`.
+- `shopping.build_list`: amounts × cooked portions ÷ recipe servings (cooked portions from eaters + guests instead of `s.portions`).
+- API: `GET api/household`, `PUT api/household/<user_id>` `{eats}`.
+- UI: settings "Haushalt" (one row per user with an "Ich esse mit" toggle); week view: eater chips per slot (tap = remove/re-add), "+ Portion" stepper for guests instead of the portions stepper, cooked portions label; today page shows cooked portions.
+
+**Tests added**
+- `test_db.py`: migration 7 on a DB with an existing plan → eaters for every user on the active slots, `portions` column gone; household validation.
+- `test_planner.py` / `test_server.py`: a new week puts exactly the participants on every active slot; `eater` and `guests` actions incl. ranges and unknown users; `activate` re-adds the participants; the `portions` action is rejected; shopping scales by eaters + guests; the today page shows cooked portions.
+
+**Acceptance**
+- [ ] Two HA users with "Ich esse mit" appear on every slot of a new week; removing one from a slot and adding a guest changes the cooked portions and the shopping amounts (manual).
+- [ ] A user who does not eat along is not put on new weeks (manual).
+- [ ] All tests pass.
+
+### M12 – Weight loss: targets, canteen and personal portions
+
+**Build**
+- Migration 8 (§6): target and canteen columns on `users`, table `plan_canteen`.
+- `db.py`: household fields `kcal_target`, `protein_target_g`, `canteen_kcal`, `canteen_days` (validation as in the §6 users table).
+- `planner.py` (pure functions):
+  ```
+  STEP = 0.25, MIN_FACTOR = 0.5, MAX_FACTOR = 2.0, FIT_RANGE = (0.75, 1.5)
+  For each person u and day d:
+    C     = canteen_kcal(u) if (week, d, u) is in plan_canteen else 0
+    meals = active, non-skipped, filled slots of d where u is an eater (from M14 also leftover slots,
+            with the recipe of their source slot); k = kcal per portion of the meal's recipe
+    if u has no kcal_target:     factor(u, d) = 1
+    elif some meal has no kcal:  factor(u, d) = 1, day flagged "incomplete"
+    else:                        factor(u, d) = clamp(round_to_step((kcal_target - C) / sum(k)), MIN_FACTOR, MAX_FACTOR)
+                                 (kcal_target - C <= 0 -> MIN_FACTOR; rounding to the nearest 0.25, halves up)
+    day_kcal(u, d)    = C + sum(factor * k)
+    day_protein(u, d) = sum(factor * protein per portion)      (canteen protein unknown, not counted)
+  cooked_portions(s) = sum(factor(u, d_s) over eaters u of s) + guests(s)
+  Fit, used by generate/reroll for candidate r in slot s, per eater u of s with a target:
+    b(u) = (kcal_target - C) / number of meals of u on d_s (counting s)
+    misfit if b(u) / k(r) is outside FIT_RANGE
+    adjusted score = score - misfits / eaters with a target    (k(r) unknown -> unchanged, fit "unknown")
+  ```
+  Functions: `personal_factors(...)`, `person_day_totals(...)`, `cooked_portions(...)` (replaces the M11 count), fit adjustment inside `generate`/`reroll` with reason `fit`. The per-portion `day_totals` stay for days where no eater has a target.
+- `plans.py`: new weeks get the canteen defaults (every participant whose `canteen_days` contains the day gets a `plan_canteen` row and is not put on that day's lunch); `set_canteen(conn, week, day, user_id, on)`: on → row added and the person removed from that day's lunch eaters; off → row deleted and the person put back on the lunch if it is active. `view` adds per slot `portions_by_user`, per day `canteen` (user ids) and `totals_by_user {user_id: {kcal, kcal_target, protein_g, protein_target, canteen, incomplete}}`; `today_view` adds `my_portion`, `my_kcal`, `my_canteen`.
+- `shopping.build_list`: cooked portions with personal factors.
+- API: household fields; `POST api/plans/<week>/canteen` `{day, user_id, on}`.
+- UI: settings "Haushalt" per user: kcal target, protein target, canteen kcal, canteen weekdays; week view: portion per eater ("1¼"), "Kantine" toggle per person and day, per-person day totals (green within ±10 % of the target, amber outside), fit hint "passt nicht zu euren Zielen", "Nährwerte schätzen" link on incomplete days; today page: "Deine Portion: 1¼ (≈ 780 kcal)" or "Kantine".
+
+**Tests added**
+- `test_portions.py`: worked example (targets 1700/1300, lunch 450 + dinner 800 kcal → factors 1.25 and 1.0, cooked lunch portions 2.25); canteen day (700 kcal + dinner 800 → factor 1.25, day total 1700); budget ≤ 0 → 0.5; clamps at 0.5 and 2.0; rounding (1.36 → 1.25, 1.38 → 1.5); no target → 1.0; missing kcal → 1.0 + incomplete; protein totals; fit adjustment lowers a misfit recipe's score and leaves `unknown` unchanged; canteen defaults applied to new weeks only; the canteen toggle removes/re-adds the lunch eater; household validation (ranges, weekday list).
+- `test_today.py`: `my_portion`, `my_kcal`, `my_canteen`.
+
+**Acceptance**
+- [ ] With kcal targets for two people, the week view shows a portion per person and meal and day totals close to each target (manual, phone).
+- [ ] A canteen lunch for one person counts their canteen kcal, removes only them from the planned lunch and lowers the cooked portions and shopping amounts (manual).
+- [ ] A very calorie-dense recipe is rarely suggested and shows the fit hint when set by hand (manual).
+- [ ] Protein per person and day is shown against the protein target (manual).
+- [ ] The start page shows "deine Portion" or "Kantine" (manual, phone).
+- [ ] All tests pass.
+
+### M13 – Categories and slot rules
+
+**Build**
+- Migration 9 (§6): `tags.category`, the six missing category tags, the 8 categories flagged, `plan_slots.rule_tag_id` (`ON DELETE SET NULL`). Setting `slot_rules` (§6).
+- `recipes.py`: tags carry `category`; `update_tag(id, name, category)`; `auto_categories(draft) -> set[str]` (constants `QUICK_MAX_MINUTES = 30`, `LIGHT_MAX_KCAL = 500`, `PROTEIN_MIN_SHARE = 0.25`; missing values → no tick), applied by `importer.build_draft` after the AI and returned by `api/nutrition/estimate` as `suggested_tags`.
+- `ai.py`: `MAX_TAGS = 8`; the prompt asks to judge Meal Prep, Sonntagsessen, Lunchbox, Ofengericht and Gäste from the recipe.
+- `plans.py`: new weeks copy `slot_rules` into `rule_tag_id`; slot action `rule {tag_id | null}` (category tags only).
+- `planner._candidates`: with a rule, only recipes with that tag; if none qualifies, the rule is dropped for this slot and the reason gets `rule_met: false`; reasons carry `rule`.
+- UI: category chips (styled apart from other tags) on cards, detail and form; category filter on `#/rezepte`; "Kategorie" toggle in the tag editor; a category select per cell of the slot pattern grid; a rule select per slot in the week view with the hint "Kategorie nicht erfüllt".
+
+**Tests added**
+- `test_db.py`: migration 9 on an existing DB (missing tags added, existing ones not duplicated, exactly the 8 flagged).
+- `test_recipes.py`: `category` round trip; `auto_categories` at the boundaries (30/31 min, 500/501 kcal, protein share exactly 25 %, missing values).
+- `test_planner.py`: rule filters; fallback with `rule_met: false`; a rule changed in one week leaves `slot_rules` unchanged; deleting a category tag clears the rules.
+- `test_ai.py`: up to 8 tags kept.
+
+**Acceptance**
+- [ ] With "Mo–Fr Abend = Schnell" in the pattern, those slots get Schnell recipes; without a matching recipe the slot is filled anyway and says so (manual).
+- [ ] An imported recipe with ≤ 30 min arrives with "Schnell" ticked; the AI suggests sensible categories (manual).
+- [ ] Recipes can be filtered by category (manual).
+- [ ] All tests pass.
+
+### M14 – Leftovers ("Reste von …")
+
+**Build**
+- Migration 10 (§6): `plan_slots.leftover_day`, `plan_slots.leftover_meal`.
+- `plans.py`: slot action `leftover {from_day, from_meal} | null`. The source must be in the same week, strictly earlier (day, then lunch before dinner), active, filled and not itself a leftover. The leftover slot shows the source's recipe (dynamic: it follows rerolls and clears of the source); `null` removes the link and empties the slot; deactivating a source removes its leftover links.
+- `planner.py`: `generate`/`reroll` skip leftover slots but count their recipe as used; personal factors count leftover meals with the source recipe's kcal; cooked portions of the source add, for every slot t marked "Reste von" it, the factors of t's eaters + t's guests; category rules are ignored on leftover slots.
+- `shopping.build_list`: leftover slots add nothing themselves (their portions are in the source).
+- History and "Wie war's?": a leftover adds no extra history or rating entry.
+- UI: "Reste von …" select listing the valid earlier slots; a leftover slot shows "Reste von <Tag> <Mahlzeit>" instead of reroll/replace.
+
+**Tests added**
+- `test_planner.py`: valid and invalid sources (later slot, other week, leftover of a leftover, empty, inactive); a leftover follows a reroll of its source; `generate` skips leftover slots; cooked portions include leftovers; shopping counts the source only; no extra rate-list entry.
+
+**Acceptance**
+- [ ] "Di Mittag = Reste von Mo Abend" shows the same recipe on Tuesday, raises Monday's cooked portions and adds nothing extra to the checklist (manual).
+- [ ] "Vorschlag erstellen" leaves leftover slots alone (manual).
+- [ ] All tests pass.
+
 ## 10. Testing
 
 **Automated** (`cd mealprep_planner`, then `py -3.13 -m unittest discover -s tests -v`; stdlib `unittest` only; no network, no real HA):
-- Core logic: ingredient parsing, scaling, formatting and aggregation; taste prediction and household score; plan generation (seeded); shopping diff; sensor state; "Wie war's?" rules; ISO week helpers.
-- Data validation: `validate_draft`, AI output validation, settings, migrations (fresh DB → current version, idempotent).
-- Trust boundaries: SSRF guard (schemes, ports, private/loopback/link-local IPs, redirects), size limits, image magic bytes, Ingress IP allow-list and user headers, JSON-only writes, body size, static path traversal.
+- Core logic: ingredient parsing, scaling, formatting and aggregation; taste prediction and household score; plan generation (seeded) incl. category rules (M13) and calorie fit (M12); shopping diff and checklist (M10); eaters and cooked portions (M11); personal portions, canteen and per-person totals (M12); automatic categories (M13); leftovers (M14); sensor state; "Wie war's?" rules; ISO week helpers.
+- Data validation: `validate_draft`, AI output and nutrition-guess validation, settings and household fields, migrations (fresh DB → current version, idempotent; migrations 7–10 also on a DB with existing plans).
+- Trust boundaries: SSRF guard (schemes, ports, private/loopback/link-local IPs, redirects), size limits, image magic bytes, Ingress IP allow-list and user headers, JSON-only writes, body size, static path traversal, Bring! deeplink URL encoding.
 - HA client and Bring!/AI/inbox flows against a stub HA server (`http.server` in a thread); page fetching against stub servers or mocks; fixtures are self-written.
 - Hygiene: stdlib-only imports, i18n key parity and coverage, `config.yaml` version = `VERSION`.
 
 **By hand** (listed per milestone as "(manual …)"):
 - Installing/updating the app from GitHub, Ingress panel, user identity with two HA accounts, backups.
 - Real recipe sites, TikTok/YouTube/Instagram links, AI result quality, share sheet on Android and iOS.
-- Bring! phone app contents, `sensor.essensplan` on a dashboard and after an HA restart.
-- Phone usability of every page in both languages.
+- Bring! phone app contents, Bring! import and "Bring! öffnen" links, `sensor.essensplan` on a dashboard and after an HA restart.
+- Personal portions and day totals with real targets; phone usability of every page in both languages.
 
 ## How we'll work afterwards
 
