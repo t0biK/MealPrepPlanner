@@ -185,6 +185,59 @@ class DevServerTest(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/api/imports/{job_id}/save", draft)[0], 400)  # already saved
         self.assertEqual(self.call("POST", f"/api/imports/{self.make_job('queued')}/save", draft)[0], 400)
 
+    def test_create_text_import(self):
+        status, body = self.call("POST", "/api/imports", {"text": "  Pfannkuchen\n3 Eier  "})
+        self.assertEqual((status, len(body["ids"])), (201, 1))
+        job = self.call("GET", f"/api/imports/{body['ids'][0]}")[1]
+        self.assertEqual((job["url"], job["origin"], job["status"], job["title"]), (None, "single", "queued", None))
+        conn = db.connect(self.tmp.name)
+        self.assertEqual(conn.execute("SELECT text FROM import_jobs WHERE id = ?", (job["id"],)).fetchone()[0],
+                         "Pfannkuchen\n3 Eier")
+        conn.close()
+        self.assertEqual(self.call("POST", f"/api/imports/{job['id']}/retry")[0], 400)  # queued
+        for bad in ({"text": ""}, {"text": "   \n"}, {"text": 5}, {"text": None}, {"text": "x" * 20001}):
+            self.assertEqual(self.call("POST", "/api/imports", bad), (400, {"error": "invalid_field", "field": "text"}))
+        self.assertEqual(self.call("POST", "/api/imports", {"text": "x" * 20000})[0], 201)
+
+    def test_pasted_caption_requeues_a_draft_and_keeps_it(self):
+        draft = {"format_version": 1, "title": "instagram.com", "servings": 2, "source_kind": "instagram",
+                 "source_url": "https://example.com/x", "warnings": ["paste_caption"]}
+        job_id = self.make_job("review", draft)
+        status, job = self.call("POST", f"/api/imports/{job_id}/text", {"text": " 200 g Mehl "})
+        self.assertEqual((status, job["status"]), (200, "queued"))
+        conn = db.connect(self.tmp.name)
+        row = conn.execute("SELECT text, draft FROM import_jobs WHERE id = ?", (job_id,)).fetchone()
+        self.assertEqual((row["text"], json.loads(row["draft"])), ("200 g Mehl", draft))  # the worker needs link and image
+        conn.close()
+        self.assertEqual(self.call("POST", f"/api/imports/{job_id}/text", {"text": "x"})[0], 400)  # queued, not in review
+        # a retry starts from the link again, without the pasted caption
+        conn = db.connect(self.tmp.name)
+        with conn:
+            conn.execute("UPDATE import_jobs SET status = 'failed' WHERE id = ?", (job_id,))
+        conn.close()
+        self.call("POST", f"/api/imports/{job_id}/retry")
+        conn = db.connect(self.tmp.name)
+        row = conn.execute("SELECT text, draft FROM import_jobs WHERE id = ?", (job_id,)).fetchone()
+        conn.close()
+        self.assertEqual((row["text"], row["draft"]), (None, None))
+
+    def test_pasted_caption_validation_and_retry_of_text_jobs(self):
+        job_id = self.make_job("review", {"format_version": 1, "title": "x", "servings": 1})
+        for bad in ({}, {"text": ""}, {"text": 5}, {"text": "x" * 20001}):
+            self.assertEqual(self.call("POST", f"/api/imports/{job_id}/text", bad)[1]["field"], "text")
+        self.assertEqual(self.call("POST", "/api/imports/999999/text", {"text": "x"})[0], 404)
+        self.assertEqual(self.call("POST", f"/api/imports/{self.make_job('failed')}/text", {"text": "x"})[0], 400)
+        # a text-only job keeps its text on retry (it has no link to start from)
+        text_id = self.call("POST", "/api/imports", {"text": "Kuchen"})[1]["ids"][0]
+        conn = db.connect(self.tmp.name)
+        with conn:
+            conn.execute("UPDATE import_jobs SET status = 'failed' WHERE id = ?", (text_id,))
+        conn.close()
+        self.assertEqual(self.call("POST", f"/api/imports/{text_id}/retry")[1]["status"], "queued")
+        conn = db.connect(self.tmp.name)
+        self.assertEqual(conn.execute("SELECT text FROM import_jobs WHERE id = ?", (text_id,)).fetchone()[0], "Kuchen")
+        conn.close()
+
     def test_images_are_served_only_for_valid_names(self):
         png = b"\x89PNG\r\n\x1a\n" + b"0" * 10
         name = "ab" * 32 + ".png"

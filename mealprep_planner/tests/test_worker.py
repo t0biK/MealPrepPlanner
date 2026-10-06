@@ -63,6 +63,19 @@ class WorkerTest(unittest.TestCase):
             worker.process_one(self.tmp.name)
         self.assertEqual(self.job(job_id)["status"], "discarded")
 
+    def test_text_job_reaches_build_draft_with_its_text(self):
+        job_id = worker.enqueue_text(self.conn, "Kuchen\n3 Eier", "single", None)
+        seen = []
+
+        def build(job, conn, data_dir):
+            seen.append((job["url"], job["text"]))
+            return {"title": "T"}
+
+        with mock.patch.object(importer, "build_draft", build):
+            self.assertTrue(worker.process_one(self.tmp.name))
+        self.assertEqual(seen, [(None, "Kuchen\n3 Eier")])
+        self.assertEqual(self.job(job_id)["status"], "review")
+
     def test_running_jobs_are_requeued_at_start(self):
         (job_id,) = worker.enqueue(self.conn, ["https://example.com/a"], "single", None)
         self.conn.execute("UPDATE import_jobs SET status = 'running' WHERE id = ?", (job_id,))

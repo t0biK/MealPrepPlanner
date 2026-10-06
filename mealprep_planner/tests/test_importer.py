@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
-from mealprep import db, importer, recipes
+from mealprep import db, ha, importer, recipes
 
 TAGS = ["Nudeln", "Italienisch", "Schnell", "Suppe"]
 
@@ -178,7 +178,7 @@ class FetchTest(unittest.TestCase):
             conn = db.connect(tmp)
             db.migrate(conn)
             draft = importer.build_draft({"url": self.url("/page")}, conn, tmp)
-            self.assertEqual(draft["warnings"], ["no_recipe_data"])
+            self.assertEqual(draft["warnings"], ["no_recipe_data", "ai_disabled"])
             self.assertEqual(draft["title"], "127.0.0.1")
             conn.close()
 
@@ -290,7 +290,7 @@ class BuildDraftTest(unittest.TestCase):
     def test_jsonld_draft_is_valid(self):
         draft = self.build(ld_page(RECIPE), image="a" * 64 + ".jpg")
         self.assertEqual(draft["source_url"], "https://example.com/r")
-        self.assertEqual((draft["title"], draft["image"], draft["warnings"]), ("Spaghetti & Sauce", "a" * 64 + ".jpg", []))
+        self.assertEqual((draft["title"], draft["image"], draft["warnings"]), ("Spaghetti & Sauce", "a" * 64 + ".jpg", ["ai_disabled"]))
         self.assertEqual(draft["tags"], ["Nudeln", "Schnell", "Suppe", "Italienisch"])
 
     def test_og_image_fills_in_when_jsonld_has_none(self):
@@ -299,32 +299,325 @@ class BuildDraftTest(unittest.TestCase):
         self.assertEqual(self.build(page)["image_url"], "https://example.com/og.jpg")
 
     def test_image_failure_warns(self):
-        self.assertEqual(self.build(ld_page(RECIPE), image=None)["warnings"], ["image_failed"])
+        self.assertEqual(self.build(ld_page(RECIPE), image=None)["warnings"], ["ai_disabled", "image_failed"])
 
     def test_page_without_recipe_gives_opengraph_prefill(self):
         html = '<title>Titel</title><meta property="og:title" content="OG"><meta property="og:image" content="https://example.com/i.jpg">'
         draft = self.build(html)
         self.assertEqual((draft["title"], draft["image_url"], draft["ingredients"], draft["steps"]),
                          ("OG", "https://example.com/i.jpg", [], []))
-        self.assertEqual(draft["warnings"], ["no_recipe_data", "image_failed"])
+        self.assertEqual(draft["warnings"], ["no_recipe_data", "ai_disabled", "image_failed"])
         self.assertEqual(self.build("<title>Nur Titel</title>")["title"], "Nur Titel")
         self.assertEqual(self.build("<p>leer</p>")["title"], "example.com")
 
     def test_unusable_recipe_falls_back_to_prefill(self):
         draft = self.build(ld_page({"@type": "Recipe", "name": ""}, extra_head='<meta property="og:title" content="OG">'))
-        self.assertEqual((draft["title"], draft["warnings"]), ("OG", ["no_recipe_data"]))
+        self.assertEqual((draft["title"], draft["warnings"]), ("OG", ["no_recipe_data", "ai_disabled"]))
 
     def test_already_imported_warning(self):
         recipes.create_recipe(self.conn, recipes.validate_draft(
             {"format_version": 1, "title": "Alt", "servings": 2, "source_url": "https://example.com/final"}, [])[0], None)
         draft = self.build(ld_page(RECIPE), url="https://example.com/short", final="https://example.com/final")
-        self.assertEqual(draft["warnings"], ["already_imported", "image_failed"])
+        self.assertEqual(draft["warnings"], ["already_imported", "ai_disabled", "image_failed"])
         self.assertEqual(draft["source_url"], "https://example.com/final")
 
     def test_default_portions_setting_is_used(self):
         db.set_settings(self.conn, {"default_portions": 5})
         recipe = {k: v for k, v in RECIPE.items() if k != "recipeYield"}
         self.assertEqual(self.build(ld_page(recipe))["servings"], 5)
+
+
+
+class SourceKindTest(unittest.TestCase):
+    def test_hosts(self):
+        cases = {
+            "https://www.tiktok.com/@a/video/1": "tiktok", "https://tiktok.com/@a/video/1": "tiktok",
+            "https://vm.tiktok.com/ZMabc/": "tiktok", "https://m.tiktok.com/v/1": "tiktok",
+            "https://www.youtube.com/watch?v=x": "youtube", "https://youtube.com/shorts/x": "youtube",
+            "https://m.youtube.com/watch?v=x": "youtube", "https://youtu.be/x": "youtube",
+            "https://www.instagram.com/reel/x/": "instagram", "https://instagram.com/p/x/": "instagram",
+            "https://www.chefkoch.de/rezepte/1": "web", "https://example.com/": "web",
+            "https://nottiktok.com/x": "web", "https://tiktok.com.evil.example/x": "web",
+            "https://example.com/?u=https://youtube.com/": "web",
+        }
+        for url, kind in cases.items():
+            self.assertEqual(importer.source_kind(url), kind, url)
+
+
+class OEmbedTest(unittest.TestCase):
+    def oembed(self, kind, payload, url="https://www.tiktok.com/@a/video/1?x=1&y=2"):
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        with mock.patch.object(importer, "fetch", return_value=(url, "application/json", body)) as fetch:
+            return importer.oembed(url, kind), fetch
+
+    def test_tiktok_and_youtube_endpoints(self):
+        _, fetch = self.oembed("tiktok", {})
+        self.assertEqual(fetch.call_args.args[0],
+                         "https://www.tiktok.com/oembed?url=https%3A%2F%2Fwww.tiktok.com%2F%40a%2Fvideo%2F1%3Fx%3D1%26y%3D2")
+        self.assertEqual(fetch.call_args.args[1], 256 * 1024)
+        _, fetch = self.oembed("youtube", {}, "https://youtu.be/abc")
+        self.assertEqual(fetch.call_args.args[0], "https://www.youtube.com/oembed?url=https%3A%2F%2Fyoutu.be%2Fabc&format=json")
+
+    def test_fields(self):
+        info, _ = self.oembed("tiktok", {"title": "Pasta  \n 200 g Nudeln\n\n\n2 Eier ", "author_name": " Koch  Max ",
+                                         "thumbnail_url": "https://cdn.example.com/t.jpg", "html": "<iframe>"})
+        self.assertEqual(info, {"caption": "Pasta\n200 g Nudeln\n2 Eier", "author": "Koch Max",
+                                "thumbnail": "https://cdn.example.com/t.jpg"})
+
+    def test_missing_and_bad_fields(self):
+        info, _ = self.oembed("youtube", {})
+        self.assertEqual(info, {"caption": "", "author": "", "thumbnail": None})
+        info, _ = self.oembed("youtube", {"title": 5, "author_name": [], "thumbnail_url": "javascript:alert(1)"})
+        self.assertEqual(info, {"caption": "", "author": "", "thumbnail": None})
+        info, _ = self.oembed("tiktok", {"title": "t" * 6000, "author_name": "a" * 300})
+        self.assertEqual((len(info["caption"]), len(info["author"])), (5000, 200))
+
+    def test_non_object_json_is_a_fetch_failure(self):
+        for payload in (b"not json", b"[1]", b'"x"', b"null"):
+            with self.assertRaises(importer.FetchError) as cm:
+                self.oembed("tiktok", payload)
+            self.assertEqual(cm.exception.code, "fetch_failed")
+
+
+class PageTextTest(unittest.TestCase):
+    def test_drops_scripts_and_styles(self):
+        html = ("<html><head><style>p {color: red}</style><script>var x = 'geheim';</script></head><body>"
+                "<h1>Titel</h1><noscript>Bitte JS aktivieren</noscript><p>Erster   Absatz\n mit &amp; Umbruch</p>"
+                "<script type='application/ld+json'>{\"name\": \"json\"}</script><p>Ende</p></body></html>")
+        self.assertEqual(importer.page_text(html), "Titel Erster Absatz mit & Umbruch Ende")
+
+    def test_limit_and_garbage(self):
+        self.assertEqual(len(importer.page_text("<p>" + "wort " * 10000 + "</p>")), 20000)
+        self.assertIsInstance(importer.page_text("<<< <p"), str)  # broken markup does not raise
+        self.assertEqual(importer.page_text("<script>nur script"), "")
+        self.assertEqual(importer.page_text(""), "")
+
+
+class CaptionFieldsTest(unittest.TestCase):
+    def test_lines_with_an_amount_are_ingredients(self):
+        text = "Schnelle Pasta 🍝\n\n200 g Nudeln\n- 2 Zwiebeln\n1. Zwiebeln schneiden\nSalz\n½ TL Pfeffer"
+        got = importer._caption_fields(text)
+        self.assertEqual(got["title"], "Schnelle Pasta 🍝")
+        self.assertEqual([(i["amount"], i["name"]) for i in got["ingredients"]],
+                         [(200, "Nudeln"), (2, "Zwiebeln"), (0.5, "Pfeffer")])
+
+    def test_title_is_the_first_line_without_an_amount(self):
+        got = importer._caption_fields("200 g Mehl\n2 Eier\nPfannkuchen")
+        self.assertEqual((got["title"], len(got["ingredients"])), ("Pfannkuchen", 2))
+        self.assertEqual(importer._caption_fields("200 g Mehl")["title"], "200 g Mehl")  # nothing else to use
+        self.assertEqual(len(importer._caption_fields("x" * 300)["title"]), 200)
+
+
+class BuildDraftAiTest(unittest.TestCase):
+    CAPTION = "Pasta Pomodoro\n200 g Spaghetti\n1 Dose Tomaten\nSalz"
+    OEMBED = {"title": CAPTION, "author_name": "Koch", "thumbnail_url": "https://cdn.example.com/t.jpg"}
+    AI = {
+        "title": "Spaghetti Pomodoro", "servings": 2, "total_minutes": 20, "for_lunch": True, "for_dinner": True,
+        "tags": ["Nudeln"], "steps": [], "nutrition": {"kcal": 600, "protein_g": 20, "fat_g": 10, "carbs_g": 100},
+        "ingredients": [{"amount": 200, "unit": "g", "name": "Spaghetti", "note": None}],
+    }
+    IMAGE = "c" * 64 + ".jpg"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(self.tmp.name)
+        db.migrate(self.conn)
+        self.set("ai_entity", "ai_task.test")
+        self.calls = []
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def set(self, key, value):
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+
+    def ai_reply(self, data):
+        """Stub ha.call_service; data is the AI's answer (dict -> fenced JSON, str -> raw) or an exception."""
+        def call(domain, service, payload, return_response=False, timeout=10):
+            self.calls.append(payload["instructions"])
+            if isinstance(data, Exception):
+                raise data
+            text = "```json\n" + json.dumps(data) + "\n```" if isinstance(data, dict) else data
+            return {"service_response": {"data": text}}
+        return mock.patch.object(ha, "call_service", call)
+
+    def build(self, job, pages=None, image=IMAGE):
+        """pages: url prefix -> (final_url, content type, body bytes); every other fetch fails the test."""
+        self.fetched = []
+
+        def fake_fetch(url, max_bytes, accept):
+            self.fetched.append(url)
+            for key, value in (pages or {}).items():
+                if url.startswith(key):
+                    return value
+            raise AssertionError("unexpected fetch " + url)
+
+        with mock.patch.object(importer, "fetch", fake_fetch), \
+             mock.patch.object(importer, "download_image", return_value=image) as dl:
+            self.download = dl
+            return importer.build_draft(job, self.conn, self.tmp.name)
+
+    def tiktok_pages(self, oembed=None, final="https://www.tiktok.com/@koch/video/1"):
+        return {"https://www.tiktok.com/oembed": (final, "application/json", json.dumps(oembed or self.OEMBED).encode()),
+                "https://vm.tiktok.com/": (final, "text/html", b"<html></html>")}
+
+    def test_tiktok_with_ai(self):
+        with self.ai_reply(self.AI):
+            d = self.build({"url": "https://www.tiktok.com/@koch/video/1"}, self.tiktok_pages())
+        self.assertEqual((d["title"], d["source_kind"], d["source_url"]),
+                         ("Spaghetti Pomodoro", "tiktok", "https://www.tiktok.com/@koch/video/1"))
+        self.assertEqual((d["image"], d["image_url"], d["tags"]), (self.IMAGE, "https://cdn.example.com/t.jpg", ["Nudeln"]))
+        self.assertEqual(d["nutrition"]["source"], "ai")
+        self.assertEqual(d["warnings"], [])
+        self.assertIn("1 Dose Tomaten", self.calls[0])  # the caption is what the AI reads
+        self.assertEqual(len(self.fetched), 1)  # oEmbed only
+
+    def test_tiktok_without_ai_uses_the_caption_lines(self):
+        for enabled, entity in ((False, "ai_task.test"), (True, None)):  # switched off / no entity chosen
+            self.set("ai_enabled", enabled)
+            self.set("ai_entity", entity)
+            d = self.build({"url": "https://www.tiktok.com/@koch/video/1"}, self.tiktok_pages())
+            self.assertEqual((d["title"], d["warnings"]), ("Pasta Pomodoro", ["ai_disabled"]))
+            self.assertEqual([i["name"] for i in d["ingredients"]], ["Spaghetti", "Tomaten"])
+            self.assertEqual(d["image"], self.IMAGE)
+        self.assertEqual(self.calls, [])
+
+    def test_ai_failure_keeps_the_rule_based_draft(self):
+        for failure in (ha.HAError(None, "ha_unavailable"), "kein JSON", {"title": ""}):
+            with self.ai_reply(failure):
+                d = self.build({"url": "https://www.tiktok.com/@koch/video/1"}, self.tiktok_pages())
+            self.assertEqual((d["title"], d["warnings"], len(d["ingredients"])), ("Pasta Pomodoro", ["ai_failed"], 2))
+
+    def test_youtube(self):
+        info = {"title": "Cremige Suppe in 10 Minuten", "author_name": "Koch", "thumbnail_url": "https://i.ytimg.com/vi/x/hq.jpg"}
+        pages = {"https://www.youtube.com/oembed": ("u", "application/json", json.dumps(info).encode())}
+        self.set("ai_enabled", False)
+        d = self.build({"url": "https://www.youtube.com/watch?v=x"}, pages)
+        self.assertEqual((d["title"], d["source_kind"], d["ingredients"]), ("Cremige Suppe in 10 Minuten", "youtube", []))
+        self.assertEqual(d["image"], self.IMAGE)
+
+    def test_video_without_caption_asks_for_one(self):
+        pages = self.tiktok_pages({"title": "", "thumbnail_url": "https://cdn.example.com/t.jpg"})
+        with self.ai_reply(self.AI):
+            d = self.build({"url": "https://www.tiktok.com/@koch/video/1"}, pages)
+        self.assertEqual((d["title"], d["warnings"], self.calls), ("www.tiktok.com", ["paste_caption"], []))
+
+    def test_short_link_is_resolved_first(self):
+        with self.ai_reply(self.AI):
+            d = self.build({"url": "https://vm.tiktok.com/ZMabc/"}, self.tiktok_pages())
+        self.assertEqual(d["source_url"], "https://www.tiktok.com/@koch/video/1")
+        self.assertEqual(self.fetched[0], "https://vm.tiktok.com/ZMabc/")
+        self.assertIn("oembed?url=https%3A%2F%2Fwww.tiktok.com%2F%40koch%2Fvideo%2F1", self.fetched[1])
+
+    def test_instagram_is_not_fetched(self):
+        with self.ai_reply(self.AI):
+            d = self.build({"url": "https://www.instagram.com/reel/abc/"})
+        self.assertEqual((self.fetched, self.calls), ([], []))
+        self.assertEqual((d["source_kind"], d["source_url"], d["warnings"], d["ingredients"]),
+                         ("instagram", "https://www.instagram.com/reel/abc/", ["paste_caption"], []))
+        self.assertIsNone(d["image"])
+
+    def test_already_imported_applies_to_links_too(self):
+        recipes.create_recipe(self.conn, recipes.validate_draft(
+            {"format_version": 1, "title": "Alt", "servings": 2, "source_url": "https://www.instagram.com/reel/abc/"}, [])[0], None)
+        d = self.build({"url": "https://www.instagram.com/reel/abc/"})
+        self.assertEqual(d["warnings"], ["already_imported", "paste_caption"])
+
+    def test_pasted_text_job(self):
+        with self.ai_reply(self.AI):
+            d = self.build({"url": None, "text": "Pasta\n200 g Spaghetti"})
+        self.assertEqual((d["source_kind"], d["source_url"], d["title"], d["image"], d["warnings"]),
+                         ("text", None, "Spaghetti Pomodoro", None, []))
+        self.assertEqual(self.fetched, [])
+        self.download.assert_not_called()
+
+    def test_pasted_text_job_without_ai(self):
+        self.set("ai_enabled", False)
+        d = self.build({"url": None, "text": "Eierkuchen\n3 Eier\n250 g Mehl"})
+        self.assertEqual((d["title"], d["warnings"], [i["name"] for i in d["ingredients"]]),
+                         ("Eierkuchen", ["ai_disabled"], ["Eier", "Mehl"]))
+        self.assertEqual(d["servings"], 2)  # default portions
+
+    def test_caption_pasted_onto_a_draft_keeps_link_and_image(self):
+        prior = {"format_version": 1, "title": "instagram.com", "source_url": "https://www.instagram.com/reel/abc/",
+                 "source_kind": "instagram", "image": self.IMAGE, "image_url": "https://cdn.example.com/t.jpg",
+                 "servings": 2, "warnings": ["already_imported", "paste_caption", "image_failed"]}
+        job = {"url": prior["source_url"], "text": "Pasta\n200 g Spaghetti", "draft": json.dumps(prior)}
+        with self.ai_reply(self.AI):
+            d = self.build(job)
+        self.assertEqual((d["source_url"], d["source_kind"], d["image"], d["title"]),
+                         (prior["source_url"], "instagram", self.IMAGE, "Spaghetti Pomodoro"))
+        self.assertEqual(d["warnings"], ["already_imported", "image_failed"])  # paste_caption no longer applies
+        self.assertEqual(self.fetched, [])
+        self.download.assert_not_called()
+
+    def test_caption_pasted_with_ai_off_still_clears_paste_caption(self):
+        self.set("ai_enabled", False)
+        prior = {"format_version": 1, "title": "x", "source_url": "https://www.instagram.com/reel/abc/",
+                 "source_kind": "instagram", "image": None, "servings": 2, "warnings": ["paste_caption"]}
+        d = self.build({"url": prior["source_url"], "text": "Kuchen\n3 Eier", "draft": json.dumps(prior)})
+        self.assertEqual((d["warnings"], [i["name"] for i in d["ingredients"]]), (["ai_disabled"], ["Eier"]))
+
+    def test_web_with_jsonld_is_enriched(self):
+        recipes.create_recipe(self.conn, recipes.validate_draft({
+            "format_version": 1, "title": "Alt", "servings": 2,
+            "ingredients": [{"amount": 1, "unit": None, "name": "Zwiebeln", "note": None}]}, [])[0], None)
+        page = {**RECIPE, "nutrition": {"calories": "520 kcal"}, "recipeIngredient": ["1 Zwiebel", "Salz und Pfeffer"]}
+        answer = {**self.AI, "ingredients": [{"amount": 1, "unit": None, "name": "Zwiebeln", "note": None},
+                                              {"amount": None, "unit": None, "name": "Salz", "note": None},
+                                              {"amount": None, "unit": None, "name": "Pfeffer", "note": None}]}
+        pages = {"https://example.com/": ("https://example.com/r", "text/html", ld_page(page).encode())}
+        with self.ai_reply(answer):
+            d = self.build({"url": "https://example.com/r"}, pages)
+        self.assertEqual([i["name"] for i in d["ingredients"]], ["Zwiebeln", "Salz", "Pfeffer"])
+        self.assertEqual((d["title"], d["servings"]), ("Spaghetti & Sauce", 4))  # rule-based fields stay
+        self.assertEqual(d["nutrition"]["source"], "page")  # an AI estimate never replaces page nutrition
+        self.assertEqual(d["nutrition"]["kcal"], 520.0)
+        self.assertEqual(d["warnings"], [])
+        self.assertIn("Zwiebeln", self.calls[0])  # known names reach the prompt
+        self.assertIn("1 Zwiebel", self.calls[0])
+
+    def test_web_with_jsonld_estimates_missing_nutrition(self):
+        page = {k: v for k, v in RECIPE.items() if k != "nutrition"}
+        pages = {"https://example.com/": ("https://example.com/r", "text/html", ld_page(page).encode())}
+        with self.ai_reply(self.AI):
+            d = self.build({"url": "https://example.com/r"}, pages)
+        self.assertEqual(d["nutrition"], {"kcal": 600, "protein_g": 20, "fat_g": 10, "carbs_g": 100, "source": "ai"})
+
+    def test_web_with_jsonld_survives_ai_failure(self):
+        pages = {"https://example.com/": ("https://example.com/r", "text/html", ld_page(RECIPE).encode())}
+        with self.ai_reply("Entschuldigung, das kann ich nicht."):
+            d = self.build({"url": "https://example.com/r"}, pages)
+        self.assertEqual((d["title"], d["warnings"]), ("Spaghetti & Sauce", ["ai_failed"]))
+        self.assertEqual(d["ingredients"][0]["name"], "Spaghetti")
+
+    def test_web_without_jsonld_uses_the_page_text(self):
+        html = "<html><head><title>Omas Kuchen</title><script>var geheim=1</script></head><body><p>Backe 250 g Mehl und 3 Eier.</p></body></html>"
+        pages = {"https://example.com/": ("https://example.com/k", "text/html", html.encode())}
+        with self.ai_reply(self.AI):
+            d = self.build({"url": "https://example.com/k"}, pages)
+        self.assertEqual((d["title"], d["warnings"], d["source_kind"]), ("Spaghetti Pomodoro", [], "web"))  # no_recipe_data is resolved
+        self.assertIn("Backe 250 g Mehl und 3 Eier.", self.calls[0])
+        self.assertNotIn("geheim", self.calls[0])
+
+    def test_web_without_jsonld_and_failing_ai_gives_the_prefill(self):
+        html = '<html><head><meta property="og:title" content="OG Kuchen"></head><body><p>Text</p></body></html>'
+        pages = {"https://example.com/": ("https://example.com/k", "text/html", html.encode())}
+        with self.ai_reply(ha.HAError(500, "ha_error")):
+            d = self.build({"url": "https://example.com/k"}, pages)
+        self.assertEqual((d["title"], d["warnings"]), ("OG Kuchen", ["no_recipe_data", "ai_failed"]))
+
+    def test_known_names_are_most_used_first(self):
+        def recipe(*names):
+            return {"format_version": 1, "title": "R", "servings": 1,
+                    "ingredients": [{"amount": None, "unit": None, "name": n, "note": None} for n in names]}
+        for names in (("Salz", "Zwiebeln"), ("zwiebeln", "Mehl"), ("Zwiebeln",)):
+            recipes.create_recipe(self.conn, recipes.validate_draft(recipe(*names), [])[0], None)
+        self.assertEqual(recipes.top_ingredient_names(self.conn, 10)[0].casefold(), "zwiebeln")
+        self.assertEqual(recipes.top_ingredient_names(self.conn, 10)[1:], ["Mehl", "Salz"])
+        self.assertEqual(len(recipes.top_ingredient_names(self.conn, 2)), 2)
 
 
 if __name__ == "__main__":

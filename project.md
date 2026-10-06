@@ -699,7 +699,7 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 - [ ] A Chefkoch import maps an ingredient to an existing differently-written name (e.g. "Zwiebel" → existing "Zwiebeln") (manual).
 - [ ] A recipe page without nutrition gets an AI estimate shown as "geschätzt"; Chefkoch nutrition stays marked as from the page (manual).
 - [ ] With AI switched off, imports still work rule-based (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M5 – Share from phone (Rezept-Inbox)
 

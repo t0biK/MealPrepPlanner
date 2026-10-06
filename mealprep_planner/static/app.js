@@ -297,7 +297,8 @@ async function pageRecipe(app, id) {
     ...(r.steps.length ? [card(t("recipe.steps"), el("ol", { className: "steps" },
       ...r.steps.map((s) => el("li", { textContent: s }))))] : []),
     ...(nutrition && nutrition.length ? [card(t("recipe.nutrition"),
-      el("p", { textContent: nutrition.map(([v, k, u]) => `${v}${u} ${t(k)}`).join(" · ") }))] : []),
+      el("p", { textContent: nutrition.map(([v, k, u]) => `${v}${u} ${t(k)}`).join(" · ") }),
+      ...(r.nutrition.source === "ai" ? [el("span", { className: "badge", textContent: t("recipe.estimated") })] : []))] : []),
     ...(link ? [el("p", {}, t("recipe.source") + ": ", link)] : []),
     el("div", { className: "actions" },
       el("a", { className: "btn", href: `#/rezepte/${id}/bearbeiten`, textContent: t("recipe.edit") }), archiveBtn),
@@ -444,6 +445,7 @@ async function pageRecipeForm(app, id, job = null) {
       el("details", {}, el("summary", { textContent: t("form.paste") }), paste, pasteBtn)),
     card(t("form.steps"), stepBox, el("div", { className: "actions" }, addStepBtn)),
     card(t("form.nutrition"),
+      ...(n.source === "ai" ? [el("p", {}, el("span", { className: "badge", textContent: t("recipe.estimated") }))] : []),
       el("div", { className: "two" },
         label(t("recipe.kcal"), nutri.kcal), label(t("recipe.protein") + " (g)", nutri.protein_g),
         label(t("recipe.fat") + " (g)", nutri.fat_g), label(t("recipe.carbs") + " (g)", nutri.carbs_g))),
@@ -454,7 +456,8 @@ async function pageRecipeForm(app, id, job = null) {
   form.onsubmit = save;
   app.replaceChildren(
     el("h1", { textContent: job ? t("import.review") : id ? t("form.title_edit") : t("form.title_new") }),
-    ...(job ? [el("div", { className: "warnings" }, ...(r.warnings ?? []).map((w) => el("p", { textContent: "⚠ " + t(`warning.${w}`) })))] : []),
+    ...(job ? [el("div", { className: "warnings" }, ...(r.warnings ?? []).map((w) => el("p", { textContent: "⚠ " + t(`warning.${w}`) }))),
+      captionBox(job)] : []),
     form,
     ...(job ? [jobActions(job, "#/import")] : []));
 }
@@ -480,6 +483,21 @@ function jobActions(job, after) {
     act("discard", t("import.discard"), "secondary"));
 }
 
+// pasted caption: the job is queued again and the AI reads the text; link and image stay
+function captionBox(job) {
+  const area = el("textarea", { rows: 6, maxLength: 20000, placeholder: t("import.caption_hint"), ariaLabel: t("import.caption") });
+  const button = el("button", { type: "button", className: "secondary", textContent: t("import.start") });
+  button.onclick = async () => {
+    try {
+      await api("POST", `api/imports/${job.id}/text`, { text: area.value });
+      location.hash = "#/import";
+    } catch (e) {
+      toast(errorText(e));
+    }
+  };
+  return el("details", {}, el("summary", { textContent: t("import.caption") }), area, button);
+}
+
 async function pageImport(app) {
   const list = el("div");
   let timer;
@@ -488,7 +506,7 @@ async function pageImport(app) {
     try {
       const jobs = await api("GET", "api/imports?status=queued,running,review,failed");
       list.replaceChildren(...(jobs.length ? jobs.map((j) => {
-        const label = j.title || j.url;
+        const label = j.title || j.url || t("import.text_job");
         return card(null,
           el("div", { className: "row" },
             j.status === "review" ? el("a", { href: "#/import/" + j.id, textContent: label }) : el("span", { textContent: label }),
@@ -517,11 +535,15 @@ async function pageImport(app) {
   const bulk = el("textarea", { rows: 6, placeholder: t("import.bulk_hint"), ariaLabel: t("import.bulk") });
   const bulkBtn = el("button", { type: "button", textContent: t("import.start") });
   bulkBtn.onclick = () => submit({ urls: bulk.value.split(/\r?\n/) }, bulk);
+  const pasted = el("textarea", { rows: 6, maxLength: 20000, placeholder: t("import.text_hint"), ariaLabel: t("import.text") });
+  const pastedBtn = el("button", { type: "button", textContent: t("import.start") });
+  pastedBtn.onclick = () => submit({ text: pasted.value }, pasted);
 
   app.replaceChildren(
     el("h1", { textContent: t("import.title") }),
     card(null, el("div", { className: "row" }, link, linkBtn),
-      el("details", {}, el("summary", { textContent: t("import.bulk") }), bulk, bulkBtn)),
+      el("details", {}, el("summary", { textContent: t("import.bulk") }), bulk, bulkBtn),
+      el("details", {}, el("summary", { textContent: t("import.text") }), pasted, pastedBtn)),
     list);
   await load();
 }
@@ -532,7 +554,7 @@ async function pageImportJob(app, id) {
   app.replaceChildren(
     el("a", { href: "#/import", textContent: t("import.back") }),
     el("h1", { textContent: t("import.title") }),
-    card(null, el("p", { textContent: job.title || job.url }),
+    card(null, el("p", { textContent: job.title || job.url || t("import.text_job") }),
       el("span", { className: "badge", textContent: t(`import.status.${job.status}`) }),
       ...(job.error ? [el("p", { className: "muted", textContent: t(`error.${job.error}`) })] : []),
       ...(job.status === "failed" ? [jobActions(job, "#/import")] : [])));

@@ -10,9 +10,9 @@ import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
-from . import VERSION, db, recipes
+from . import VERSION, ai, db, recipes
 from .ingredients import parse_line
 
 USER_AGENT = f"MealPrepPlanner/{VERSION} (+https://github.com/t0biK/MealPrepPlanner)"
@@ -21,6 +21,8 @@ TIMEOUT = 15
 MAX_REDIRECTS = 5
 MAX_HTML = 3 * 1024 * 1024
 MAX_IMAGE = 2 * 1024 * 1024
+MAX_OEMBED = 256 * 1024
+MAX_PAGE_TEXT = 20000
 
 
 class FetchError(Exception):
@@ -220,6 +222,14 @@ def _find_recipe(node):
     return node if "Recipe" in types else _find_recipe(node.get("@graph"))
 
 
+def _ingredient(line):
+    """parse_line, fitted to the §6 limits."""
+    i = parse_line(line)
+    if i["amount"] is not None and not 0 < i["amount"] <= 100000:
+        i["amount"] = None
+    return {**i, "name": i["name"][:100], "note": i["note"][:200] if i["note"] else None}
+
+
 def _first_int(v):
     for item in _as_list(v):
         m = re.search(r"\d+", str(item))
@@ -284,10 +294,7 @@ def recipe_from_jsonld(objs, default_portions, tag_names, base_url=""):
     for line in _as_list(node.get("recipeIngredient")):
         line = _clean(line)
         if line:
-            i = parse_line(line)
-            if i["amount"] is not None and not 0 < i["amount"] <= 100000:
-                i["amount"] = None
-            ingredients.append({**i, "name": i["name"][:100], "note": i["note"][:200] if i["note"] else None})
+            ingredients.append(_ingredient(line))
     known = {n.casefold(): n for n in tag_names}
     words = []
     for field in ("keywords", "recipeCategory", "recipeCuisine"):
@@ -306,37 +313,167 @@ def recipe_from_jsonld(objs, default_portions, tag_names, base_url=""):
     }
 
 
+# ---- video / social links and page text (M4) ----
+
+SOURCE_HOSTS = {"tiktok.com": "tiktok", "youtube.com": "youtube", "youtu.be": "youtube", "instagram.com": "instagram"}
+SHORT_HOSTS = ("vm.tiktok.com", "vt.tiktok.com", "youtu.be")  # resolved through redirects before oEmbed
+
+
+def source_kind(url):
+    host = urlsplit(url).hostname or ""
+    for domain, kind in SOURCE_HOSTS.items():
+        if host == domain or host.endswith("." + domain):
+            return kind
+    return "web"
+
+
+def _lines(v):
+    """Text keeping its line structure (ingredient lists), blank lines dropped."""
+    return "\n".join(line for line in map(_line, v.splitlines()) if line)
+
+
+def oembed(url, kind):
+    """TikTok/YouTube oEmbed -> {caption, author, thumbnail}. Raises FetchError."""
+    quoted = quote(url, safe="")
+    endpoint = (f"https://www.tiktok.com/oembed?url={quoted}" if kind == "tiktok"
+                else f"https://www.youtube.com/oembed?url={quoted}&format=json")
+    _, content_type, body = fetch(endpoint, MAX_OEMBED, "application/json")
+    try:
+        data = json.loads(decode(body, content_type))
+    except (ValueError, RecursionError):
+        data = None
+    if not isinstance(data, dict):
+        raise FetchError("fetch_failed")
+    caption, author, thumb = data.get("title"), data.get("author_name"), data.get("thumbnail_url")
+    return {
+        "caption": _lines(caption)[:5000] if isinstance(caption, str) else "",
+        "author": _line(author)[:200] if isinstance(author, str) else "",
+        "thumbnail": thumb if recipes.http_url(thumb) else None,
+    }
+
+
+class _TextExtractor(HTMLParser):
+    SKIP = ("script", "style", "noscript")
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
+def page_text(page_html):
+    """Visible text of a page (no script/style/noscript), whitespace collapsed, <= 20000 chars."""
+    p = _TextExtractor()
+    p.feed(page_html)
+    p.close()
+    return _line(" ".join(p.parts))[:MAX_PAGE_TEXT]
+
+
+def _caption_fields(text):
+    """Rule-based result for free text (AI off or failed): a title line, and every line starting with an amount as an ingredient."""
+    lines = [line for line in map(_line, text.splitlines()) if line]
+    parsed = [(line, _ingredient(line)) for line in lines]
+    title = next((line for line, i in parsed if i["amount"] is None), lines[0])
+    return {"title": title[:200], "ingredients": [i for _, i in parsed if i["amount"] is not None][:100]}
+
+
 # ---- import job -> draft ----
 
+_STALE_WARNINGS = ("paste_caption", "ai_failed", "ai_disabled", "no_recipe_data")  # no longer true after pasted text
+
+
+def _field(job, key):
+    """Job as sqlite Row or dict; a missing column is None."""
+    return job[key] if key in job.keys() else None
+
+
 def build_draft(job, conn, data_dir):
-    """Fetch the job's page and build a validated recipe draft (§6). Raises FetchError."""
-    url = job["url"]
-    final_url, content_type, body = fetch(url, MAX_HTML, "text/html,application/xhtml+xml")
-    page = extract(decode(body, content_type), final_url)
-    default_portions = db.get_settings(conn)["default_portions"]
+    """Build a validated recipe draft (§6) for the job: page, video link, Instagram link or pasted text. Raises FetchError."""
+    url, text = _field(job, "url"), _field(job, "text")
+    prior = json.loads(job["draft"]) if _field(job, "draft") else None
+    settings = db.get_settings(conn)
+    default_portions = settings["default_portions"]
+    entity = settings["ai_entity"] if settings["ai_enabled"] else None
     tag_names = [t["name"] for t in recipes.list_tags(conn)]
+    known = recipes.top_ingredient_names(conn, ai.MAX_KNOWN_NAMES)
 
-    warnings = []
-    if conn.execute("SELECT 1 FROM recipes WHERE source_url IN (?, ?)", (url, final_url)).fetchone():
-        warnings.append("already_imported")
-    base = {"format_version": 1, "source_kind": "web", "source_url": final_url if len(final_url) <= 2048 else url}
+    def from_text(text, base, fallback_fields):
+        """AI draft from text; AI off/failed -> rule-based fields, plus the reason as a warning."""
+        draft, why = ai.from_text(text, known, tag_names, entity, base)
+        if draft is None:
+            draft, _ = recipes.validate_draft(
+                {**base, **fallback_fields, "warnings": base["warnings"] + why}, tag_names)
+        return draft
 
-    draft = None
-    fields = recipe_from_jsonld(page["jsonld"], default_portions, tag_names, final_url)
-    if fields:
-        fields["image_url"] = fields["image_url"] or page["og_image"]  # JSON-LD often only references the image by @id
-        draft, _ = recipes.validate_draft({**base, **fields, "warnings": warnings}, tag_names)
-    if draft is None:
-        warnings.append("no_recipe_data")
+    if text:  # pasted text, or a caption pasted onto an existing draft (keeps link and image)
+        if prior:
+            base = {k: prior.get(k) for k in ("source_url", "source_kind", "image", "image_url")}
+            warnings = [w for w in prior.get("warnings", []) if w not in _STALE_WARNINGS]
+        else:
+            base = {"source_url": url, "source_kind": source_kind(url) if url else "text"}
+            warnings = []
+        base = {**base, "format_version": 1, "servings": default_portions, "warnings": warnings}
+        draft = from_text(text, base, _caption_fields(text))
+    else:
+        kind, fetched = source_kind(url), None
+        if kind == "web" or urlsplit(url).hostname in SHORT_HOSTS:  # a short link is resolved through its redirects
+            fetched = fetch(url, MAX_HTML, "text/html,application/xhtml+xml")
+        final_url = fetched[0] if fetched else url
+        kind = source_kind(final_url)
+        warnings = []
+        if conn.execute("SELECT 1 FROM recipes WHERE source_url IN (?, ?)", (url, final_url)).fetchone():
+            warnings.append("already_imported")
+        base = {"format_version": 1, "source_kind": kind, "source_url": final_url if len(final_url) <= 2048 else url,
+                "servings": default_portions, "warnings": warnings}
         host = urlsplit(final_url).hostname or url
-        draft, _ = recipes.validate_draft({
-            **base, "title": (page["og_title"] or page["title"] or host)[:200], "servings": default_portions,
-            "image_url": page["og_image"], "warnings": warnings}, tag_names)
 
-    if draft.get("image_url"):
+        if kind == "instagram":  # no fetch: the caption is pasted by hand
+            draft, _ = recipes.validate_draft({**base, "title": host[:200], "warnings": warnings + ["paste_caption"]}, tag_names)
+        elif kind in ("tiktok", "youtube"):
+            info = oembed(final_url, kind)
+            base["image_url"] = info["thumbnail"]
+            if info["caption"]:
+                draft = from_text(info["caption"], base, _caption_fields(info["caption"]))
+            else:
+                draft, _ = recipes.validate_draft({**base, "title": host[:200], "warnings": warnings + ["paste_caption"]}, tag_names)
+        else:
+            html_text = decode(fetched[2], fetched[1])
+            page = extract(html_text, final_url)
+            draft = None
+            fields = recipe_from_jsonld(page["jsonld"], default_portions, tag_names, final_url)
+            if fields:
+                fields["image_url"] = fields["image_url"] or page["og_image"]  # JSON-LD often only references the image by @id
+                draft, _ = recipes.validate_draft({**base, **fields}, tag_names)
+                if draft:
+                    draft, why = ai.enrich(draft, known, tag_names, entity)
+                    draft["warnings"] += why
+            if draft is None:
+                base["image_url"] = page["og_image"]
+                text = page_text(html_text)
+                draft, why = ai.from_text(text, known, tag_names, entity, base) if text else (None, [])
+                if draft is None:
+                    draft, _ = recipes.validate_draft({
+                        **base, "title": (page["og_title"] or page["title"] or host)[:200],
+                        "warnings": warnings + ["no_recipe_data"] + why}, tag_names)
+
+    if draft.get("image_url") and not draft.get("image"):
         name = download_image(draft["image_url"], data_dir)
         if name:
             draft["image"] = name
         else:
             draft["warnings"].append("image_failed")
     return draft
+
+

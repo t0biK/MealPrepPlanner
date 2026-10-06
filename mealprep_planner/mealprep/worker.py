@@ -20,6 +20,15 @@ def enqueue(conn, urls, origin, user_id):
             "VALUES (?, ?, 'queued', ?, ?, ?)", (url, origin, user_id, now, now)).lastrowid for url in urls]
 
 
+def enqueue_text(conn, text, origin, user_id):
+    """Create one queued job for pasted recipe text; returns its id."""
+    now = _now()
+    with conn:
+        return conn.execute(
+            "INSERT INTO import_jobs (text, origin, status, created_by, created_at, updated_at) "
+            "VALUES (?, ?, 'queued', ?, ?, ?)", (text, origin, user_id, now, now)).lastrowid
+
+
 def reset_running(conn):
     """Jobs left `running` by a stopped process go back to the queue."""
     with conn:

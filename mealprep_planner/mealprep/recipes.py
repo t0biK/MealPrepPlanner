@@ -322,3 +322,10 @@ def known_ingredient_names(conn):
     for row in conn.execute("SELECT DISTINCT name FROM ingredients"):
         seen.setdefault(row["name"].casefold(), row["name"])
     return sorted(seen.values(), key=sort_key)
+
+
+def top_ingredient_names(conn, limit):
+    """Most used ingredient names first (case-insensitive), at most `limit`; for the AI prompt."""
+    return [r["name"] for r in conn.execute(
+        "SELECT name FROM ingredients GROUP BY name COLLATE NOCASE ORDER BY COUNT(*) DESC, name COLLATE NOCASE LIMIT ?",
+        (limit,))]

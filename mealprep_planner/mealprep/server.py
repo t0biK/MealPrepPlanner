@@ -354,14 +354,28 @@ def _set_job(h, job_id, status, allowed_from):
     with h.conn:
         cur = h.conn.execute(
             f"UPDATE import_jobs SET status = ?, error = NULL, draft = CASE WHEN ? = 'queued' THEN NULL ELSE draft END, "
+            f"text = CASE WHEN ? = 'queued' AND url IS NOT NULL THEN NULL ELSE text END, "  # a pasted caption is not kept on retry
             f"updated_at = ? WHERE id = ? AND status IN ({marks})",
-            (status, status, datetime.now().isoformat(timespec="seconds"), job_id, *allowed_from))
+            (status, status, status, datetime.now().isoformat(timespec="seconds"), job_id, *allowed_from))
     if cur.rowcount == 0:
         raise ApiError(400, "bad_request")
 
 
+MAX_TEXT = 20000
+
+
+def _pasted_text(body):
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+        raise db.InvalidField("text")
+    return text.strip()
+
+
 def api_create_imports(h, m):
     body = _body_dict(h)
+    if "text" in body:
+        h.send_json(201, {"ids": [worker.enqueue_text(h.conn, _pasted_text(body), "single", h.user["id"])]})
+        return
     if "urls" in body:
         if not isinstance(body["urls"], list):
             raise db.InvalidField("urls")
@@ -413,6 +427,18 @@ def api_retry_import(h, m):
     h.send_json(200, _job_json(_job_row(h, m)))
 
 
+def api_import_text(h, m):
+    """Re-run the import of a draft on a pasted caption; link and image stay."""
+    job, text = _job_row(h, m), _pasted_text(_body_dict(h))
+    with h.conn:
+        cur = h.conn.execute(
+            "UPDATE import_jobs SET text = ?, status = 'queued', error = NULL, updated_at = ? "
+            "WHERE id = ? AND status = 'review'", (text, datetime.now().isoformat(timespec="seconds"), job["id"]))
+    if cur.rowcount == 0:
+        raise ApiError(400, "bad_request")
+    h.send_json(200, _job_json(_job_row(h, m)))
+
+
 def api_image(h, m):
     try:
         body = (h.server.data_dir / "images" / m.group(1)).read_bytes()
@@ -434,6 +460,7 @@ ROUTES = [
     ("POST", re.compile(r"^/api/imports/(\d+)/save$"), api_save_import),
     ("POST", re.compile(r"^/api/imports/(\d+)/discard$"), api_discard_import),
     ("POST", re.compile(r"^/api/imports/(\d+)/retry$"), api_retry_import),
+    ("POST", re.compile(r"^/api/imports/(\d+)/text$"), api_import_text),
     ("GET", re.compile(r"^/api/recipes$"), api_list_recipes),
     ("POST", re.compile(r"^/api/recipes$"), api_create_recipe),
     ("GET", re.compile(r"^/api/recipes/(\d+)$"), api_get_recipe),
