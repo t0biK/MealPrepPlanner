@@ -70,9 +70,9 @@ def view(conn, week, settings, today):
     }
 
 
-def generate(conn, week, settings, rng):
+def generate(conn, week, settings, rng, today):
     plan = load_plan(conn, week, settings)
-    _store(conn, week, planner.generate(plan, *_inputs(conn, week), settings, rng))
+    _store(conn, week, planner.generate(plan, *_inputs(conn, week), settings, rng, today))
 
 
 def confirm(conn, week, settings):
@@ -90,8 +90,10 @@ def slot_action(conn, week, day, meal, body, settings, rng, today):
     plan = load_plan(conn, week, settings)
     slots = plan["slots"]
     slot = next(s for s in slots if s["day"] == day and s["meal"] == meal)
+    if action in ("reroll", "set", "clear") and (day, meal) in planner.protected(plan, today):
+        raise Refused(action)
     if action == "reroll":
-        if not slot["active"]:
+        if not slot["active"] or slot["locked"]:
             raise Refused(action)
         slots = planner.reroll(plan, day, meal, *_inputs(conn, week), settings, rng)
     elif action == "set":

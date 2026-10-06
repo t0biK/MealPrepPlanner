@@ -28,8 +28,8 @@ def slot(slots, day, meal):
     return next(s for s in slots if (s["day"], s["meal"]) == (day, meal))
 
 
-def gen(plan, recipes, ratings=None, history=(), settings=SETTINGS, seed=1):
-    return planner.generate(plan, recipes, ratings or {}, USERS, list(history), settings, random.Random(seed))
+def gen(plan, recipes, ratings=None, history=(), settings=SETTINGS, seed=1, today=MONDAY):
+    return planner.generate(plan, recipes, ratings or {}, USERS, list(history), settings, random.Random(seed), today)
 
 
 def rated(*ids, stars=3):
@@ -108,6 +108,24 @@ class CandidateRulesTest(unittest.TestCase):
         self.assertEqual(sum(s["recipe_id"] is not None for s in out), 11 + 2)
         # a locked recipe counts as used in the week
         self.assertEqual(sum(s["recipe_id"] == 99 for s in out), 2)
+
+    def test_past_slots_of_a_confirmed_plan_are_protected(self):
+        past = {(0, "lunch"): {"recipe_id": 99, "reason": {"kind": "manual"}}}  # Monday; the empty Monday dinner is past too
+        recipes = [recipe(i) for i in range(1, 30)]
+        today = MONDAY + timedelta(days=1)
+        plan = {**make_plan({(0, "lunch"), (0, "dinner"), (1, "lunch")}, past), "status": "confirmed"}
+        out = gen(plan, recipes, today=today)
+        self.assertEqual(out[:2], plan["slots"][:2])  # untouched, the empty one stays empty
+        self.assertEqual(planner.protected(plan, today), {(0, "lunch"), (0, "dinner")})
+        self.assertIsNotNone(slot(out, 1, "lunch")["recipe_id"])  # today is not protected
+        self.assertNotEqual(slot(out, 1, "lunch")["recipe_id"], 99)
+        draft = {**plan, "status": "draft"}
+        self.assertEqual(planner.protected(draft, today), set())
+        self.assertIsNotNone(slot(gen(draft, recipes, today=today), 0, "dinner")["recipe_id"])
+        # a past recipe still counts as used in the week
+        only = make_plan({(0, "lunch"), (1, "lunch")}, {(0, "lunch"): {"recipe_id": 1}})
+        only["status"] = "confirmed"
+        self.assertIsNone(slot(gen(only, [recipe(1)], today=today), 1, "lunch")["recipe_id"])
 
     def test_locked_recipe_not_picked_again(self):
         plan = make_plan({(0, "lunch"), (0, "dinner")}, {(0, "lunch"): {"recipe_id": 1, "locked": True}})

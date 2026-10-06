@@ -128,6 +128,24 @@ def _record(conn, week, item, current_item, pushed):
                  datetime.now().isoformat(timespec="seconds")))
 
 
+def _lower(conn, week, current, pushed):
+    """Items no longer needed are assumed removed from Bring! by hand: lower their recorded amount to the current
+    need (row deleted when nothing is needed), so a later increase pushes the difference again. Same rows as `diff`."""
+    with conn:
+        for (nk, key), row in pushed.items():
+            cur = current.get(nk)
+            if cur is not None and (not cur["amounts"] or row["amount"] is None):
+                continue  # still needed, only its amount is missing
+            need = cur["amounts"].get(key, 0) if cur else 0
+            if row["amount"] is not None and round(row["amount"] - need, 4) <= 0:
+                continue  # nothing surplus
+            if need:
+                conn.execute("UPDATE pushed_items SET amount = ? WHERE week = ? AND name = ? AND unit_key = ?",
+                             (need, week, row["name"], key))
+            else:
+                conn.execute("DELETE FROM pushed_items WHERE week = ? AND name = ? AND unit_key = ?", (week, row["name"], key))
+
+
 def push(conn, week):
     """Push what is new or increased since the last push to the Bring! list. Every successful call is recorded
     at once, so a partial failure can be resumed. Returns {added, updated, skipped_pantry, no_longer_needed, failed};
@@ -141,9 +159,10 @@ def push(conn, week):
         to_push, gone = diff(current, pushed)
         result = {"added": [], "updated": [], "skipped_pantry": skipped,
                   "no_longer_needed": [_entry(i) for _, i in sorted(gone.items())], "failed": []}
+        open_items = _open_items(entity) if to_push else {}
+        _lower(conn, week, current, pushed)  # only once Bring! answered, so a BringFailed keeps the list for the retry
         if not to_push:
             return result
-        open_items = _open_items(entity)
         down = False
         for nk, item in sorted(to_push.items()):
             entry = _entry(item)

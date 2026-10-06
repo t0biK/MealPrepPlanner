@@ -261,10 +261,35 @@ class PushTest(ShoppingTestCase):
         result = self.push(stub)
         self.assertEqual(len(stub.calls), before)  # nothing to send: no HA call at all
         self.assertEqual(result["no_longer_needed"], [{"name": "Hafer", "note": "200 g"}])
-        self.assertEqual(shopping.view(self.conn, WEEK)["no_longer_needed"], [{"name": "Hafer", "note": "200 g"}])
+        self.assertEqual(self.pushed(), {("Hafer", "g"): 500, ("Ei", ""): 1})  # lowered after reporting
         self.slot(0, "lunch", None)
-        self.assertEqual(self.push(stub)["no_longer_needed"], [{"name": "Ei", "note": "1"}, {"name": "Hafer", "note": "700 g"}])
-        self.assertEqual(self.pushed(), {("Hafer", "g"): 700, ("Ei", ""): 1})  # what Bring! got stays recorded
+        self.assertEqual(self.push(stub)["no_longer_needed"], [{"name": "Ei", "note": "1"}, {"name": "Hafer", "note": "500 g"}])
+        self.assertEqual(self.pushed(), {})
+        self.assertEqual(len(stub.calls), before)
+
+    def test_needed_again_after_no_longer_needed_is_pushed_again(self):
+        self.configure()
+        rid = self.recipe(2, [(500, "g", "Hafer"), (1, None, "Ei")])
+        self.slot(0, "lunch", rid)
+        stub = StubBring()
+        self.push(stub)
+        self.slot(0, "lunch", None)
+        self.assertEqual(self.push(stub)["no_longer_needed"], [{"name": "Ei", "note": "1"}, {"name": "Hafer", "note": "500 g"}])
+        self.assertEqual(self.pushed(), {})  # nothing needed any more: rows deleted
+        self.slot(0, "lunch", rid)
+        result = self.push(stub)
+        self.assertEqual([e["name"] for e in result["added"] + result["updated"]], ["Ei", "Hafer"])
+        self.assertEqual(self.pushed(), {("Hafer", "g"): 500, ("Ei", ""): 1})
+        self.slot(0, "dinner", self.recipe(2, [(300, "g", "Hafer")]))  # needed 800, then down to 600 and up to 900
+        self.push(stub)
+        self.slot(0, "dinner", self.recipe(2, [(100, "g", "Hafer")]))
+        self.assertEqual(self.push(stub)["no_longer_needed"], [{"name": "Hafer", "note": "200 g"}])
+        self.assertEqual(self.pushed(), {("Hafer", "g"): 600, ("Ei", ""): 1})
+        before = len(stub.writes())
+        self.slot(0, "dinner", self.recipe(2, [(400, "g", "Hafer")]))
+        self.assertEqual([e["note"] for e in self.push(stub)["updated"]], ["300 g"])  # the difference to the lowered record
+        self.assertEqual(len(stub.writes()), before + 1)
+        self.assertEqual(self.pushed(), {("Hafer", "g"): 900, ("Ei", ""): 1})
 
     def test_partial_failure_is_recorded_and_resumable(self):
         self.configure()

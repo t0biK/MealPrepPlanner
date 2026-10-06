@@ -701,6 +701,7 @@ async function pageWeek(app, week) {
     const plus = icon("+", t("plan.portions_more"), () => slotAct(s, { action: "portions", portions: s.portions + 1 }));
     minus.disabled = s.portions <= 1;
     plus.disabled = s.portions >= 12;
+    const past = plan.status === "confirmed" && s.date < plan.today;  // cooked: the server refuses reroll/set/clear
     const skip = el("input", { type: "checkbox", checked: s.skipped });
     skip.onchange = () => slotAct(s, { action: skip.checked ? "skip" : "unskip" });
     return el("div", { className: "slot" + (s.skipped ? " skipped" : "") },
@@ -710,8 +711,8 @@ async function pageWeek(app, week) {
         : [el("span", { className: "muted", textContent: t("plan.empty_slot") })]),
       el("p", { className: "muted", textContent: reasonText(s.reason) }),
       el("div", { className: "actions" },
-        ...(s.locked ? [] : [icon("🎲", t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
-        icon("✏️", t("plan.replace"), () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id }))),
+        ...(s.locked || past ? [] : [icon("🎲", t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
+        ...(past ? [] : [icon("✏️", t("plan.replace"), () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id })))]),
         ...(s.recipe ? [icon(s.locked ? "🔓" : "🔒", t(s.locked ? "plan.unlock" : "plan.lock"),
           () => slotAct(s, { action: s.locked ? "unlock" : "lock" }))] : []),
         icon("⏸", t("plan.deactivate"), () => slotAct(s, { action: "deactivate" }))),

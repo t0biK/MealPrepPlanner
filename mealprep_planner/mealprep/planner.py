@@ -147,13 +147,22 @@ def _used(slots, skip=()):
     return {s["recipe_id"] for s in slots if s["active"] and s["recipe_id"] is not None and (s["day"], s["meal"]) not in skip}
 
 
-def generate(plan, recipes, ratings, users, history, settings, rng):
-    """Fill all active, unlocked, non-skipped slots (Monday to Sunday, lunch first); returns the new slot list."""
+def protected(plan, today):
+    """{(day, meal)} of a confirmed plan's past slots (date < today): cooked, so they are never changed."""
+    dates = week_dates(plan["week"])
+    return {(s["day"], s["meal"]) for s in plan["slots"] if dates[s["day"]] < today} if plan["status"] == "confirmed" else set()
+
+
+def generate(plan, recipes, ratings, users, history, settings, rng, today):
+    """Fill all active, unlocked, non-skipped slots (Monday to Sunday, lunch first); returns the new slot list.
+    Past slots of a confirmed plan stay as they are but still count as used."""
     slots = [dict(s) for s in plan["slots"]]
     dates = week_dates(plan["week"])
     model = build_model(users, ratings, {r["id"]: r["tags"] for r in recipes})
     cooked = {rid for rid, _ in history}
-    todo = sorted((s for s in slots if s["active"] and not s["locked"] and not s["skipped"]), key=slot_order)
+    past = protected(plan, today)
+    todo = sorted((s for s in slots if s["active"] and not s["locked"] and not s["skipped"]
+                   and (s["day"], s["meal"]) not in past), key=slot_order)
     used = _used(slots, {(s["day"], s["meal"]) for s in todo})
     wants_new = set(rng.sample(range(len(todo)), min(settings["new_per_week"], len(todo))))
     for i, slot in enumerate(todo):

@@ -492,7 +492,7 @@ def api_get_plan(h, m):
 
 def api_generate_plan(h, m):
     week = _week(m)
-    plans.generate(h.conn, week, db.get_settings(h.conn), random.Random())
+    plans.generate(h.conn, week, db.get_settings(h.conn), random.Random(), datetime.now().date())
     worker.notify_plan_changed()
     h.send_json(200, _plan_json(h, week))
 

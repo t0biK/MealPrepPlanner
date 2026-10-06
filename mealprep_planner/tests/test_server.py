@@ -235,6 +235,31 @@ class DevServerTest(unittest.TestCase):
         self.assertEqual(post("slots/0/lunch", {"action": "skip"})[0], 400)  # future week
         self.assertEqual(post("slots/5/lunch", {"action": "set", "recipe_id": nutri})[0], 200)  # editing stays allowed
 
+    def test_plan_past_slots_of_a_confirmed_plan_and_locked_slots_are_protected(self):
+        week = "2020-W11"
+        mk = lambda title: self.call("POST", "/api/recipes", {"format_version": 1, "title": title, "servings": 2})[1]["id"]
+        rids = [mk(f"Prot {i}") for i in range(16)]
+        post = lambda path, body=None: self.call("POST", f"/api/plans/{week}/{path}", body)
+        post("slots/0/lunch", {"action": "set", "recipe_id": rids[0]})  # draft: no protection
+        draft = post("generate")[1]
+        self.assertTrue(all(s["recipe"] for s in draft["slots"]))
+        post("confirm")
+        kept = post("generate")[1]
+        self.assertEqual(kept["slots"], draft["slots"])  # all slots are in the past
+        for body in ({"action": "reroll"}, {"action": "set", "recipe_id": rids[1]}, {"action": "clear"}):
+            self.assertEqual(post("slots/0/lunch", body), (400, {"error": "bad_request"}), body)
+        self.assertEqual(self.call("GET", f"/api/plans/{week}")[1]["slots"], draft["slots"])
+        self.assertEqual(post("slots/0/lunch", {"action": "lock"})[0], 200)  # the other actions stay allowed
+        self.assertEqual(post("slots/0/lunch", {"action": "portions", "portions": 3})[0], 200)
+
+        week = "2030-W12"
+        post = lambda path, body=None: self.call("POST", f"/api/plans/{week}/{path}", body)
+        post("generate")
+        post("slots/0/lunch", {"action": "lock"})
+        self.assertEqual(post("slots/0/lunch", {"action": "reroll"}), (400, {"error": "bad_request"}))
+        post("confirm")
+        self.assertEqual(post("slots/0/lunch", {"action": "set", "recipe_id": rids[2]})[0], 200)  # future slot of a confirmed plan
+
     def test_plan_skip_in_the_past(self):
         week = "2020-W10"
         rid = self.call("POST", "/api/recipes", {"format_version": 1, "title": "Past meal", "servings": 2})[1]["id"]
