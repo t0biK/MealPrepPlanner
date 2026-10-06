@@ -168,10 +168,10 @@ To verify on the device in M1 (fill in the result, then later milestones follow 
 |---|---|---|
 | V1 | Ingress user headers present; format of the user id | open |
 | V2 | App local time equals HA local time (TZ + tzdata) | open |
-| V3 | `todo.add_item` on the Bring! list with a name that is already open: duplicate, overwrite or error? | open |
-| V4 | `todo.update_item` changes the Bring! description? Any length limit observed? | open |
-| V5 | Shape of `todo.get_items` response via REST `?return_response` | open |
-| V6 | `ai_task.generate_data` via REST: variant A (`structure` with a multi-value text field) and/or variant B (JSON demanded in `instructions`) works? Typical duration? | open |
+| V3 | `todo.add_item` on the Bring! list with a name that is already open: duplicate, overwrite or error? | Duplicate: a second open item with the same name and its own `uid` (checked via HA MCP, 2026-10-06). |
+| V4 | `todo.update_item` changes the Bring! description? Any length limit observed? | Yes, addressed by `uid` (a name is ambiguous when duplicates exist). Bring! truncates the description: a 211-char note came back as its first 191 chars (checked via HA MCP, 2026-10-06). |
+| V5 | Shape of `todo.get_items` response via REST `?return_response` | `{"service_response": {"<entity_id>": {"items": [{"summary", "uid", "status", "description"}]}}}`; `description` is `""` when empty (checked via HA MCP, 2026-10-06). |
+| V6 | `ai_task.generate_data` via REST: variant A (`structure` with a multi-value text field) and/or variant B (JSON demanded in `instructions`) works? Typical duration? | Both work, ~3 s each. A: `service_response.data` is a dict. B: `service_response.data` is a string wrapped in a ```` ```json ```` fence. M4 uses **B** (nested draft shape; fence stripped before `json.loads`) (agreed 2026-10-06; checked via HA MCP). |
 | V7 | `POST /api/states/sensor.essensplan` from the app works | open |
 
 ## 6. Data format
@@ -779,7 +779,7 @@ Follow the results V3–V5 in §5; if they contradict this description, ask befo
 **Build**
 - Migration 6 (`pantry` + defaults, `pushed_items`).
 - `ingredients.py`: `unit_key(unit)` (`g`, `ml`, canonical unit or `''`), `to_base(amount, unit)`, `shopping_round(amount, unit)` (§6 unit table), `aggregate(lines) -> {name_key: Item}` (key = name case-folded; amount-less parts ignored when the same name has an amount), `format_note(parts) -> str` (mass, volume, then other units alphabetically, joined with " + ", e.g. "1,25 kg + 2 Dosen"; empty if no amounts).
-- `mealprep/shopping.py`: `build_list(conn, week)` (active, non-skipped, filled slots; amounts × slot portions / recipe servings; pantry names excluded case-insensitively); `diff(current, pushed) -> (to_push, no_longer_needed)` (per name + unit_key: positive delta is pushed; amount-less items once; smaller or missing current amounts → no longer needed); `push(conn, week) -> result`: read open Bring! items (`todo.get_items`, `needs_action`), then per item to push: open item with the same name (case-insensitive) → `todo.update_item` with description = existing + " + " + note (or just the note if empty); else `todo.add_item` (item = name, description = note); every successful call immediately updates `pushed_items`, so a partial failure can be resumed.
+- `mealprep/shopping.py`: `build_list(conn, week)` (active, non-skipped, filled slots; amounts × slot portions / recipe servings; pantry names excluded case-insensitively); `diff(current, pushed) -> (to_push, no_longer_needed)` (per name + unit_key: positive delta is pushed; amount-less items once; smaller or missing current amounts → no longer needed); `push(conn, week) -> result`: read open Bring! items (`todo.get_items`, `needs_action`), then per item to push: open item with the same name (case-insensitive; the first one if several, V3) → `todo.update_item` addressed by its `uid` (V4) with description = existing + " + " + note (or just the note if empty; Bring! truncates descriptions beyond ~191 chars and the app accepts that silently (agreed 2026-10-06)); else `todo.add_item` (item = name, description = note); every successful call immediately updates `pushed_items`, so a partial failure can be resumed.
 - `POST api/plans/<week>/confirm` pushes after confirming; the plan stays confirmed even if the push fails. Result: `{added, updated, skipped_pantry, no_longer_needed, failed}`. `POST api/plans/<week>/push` pushes the remaining difference. `GET api/plans/<week>/shopping`, `GET/PUT api/pantry`.
 - UI: result panel after confirm, "Erneut senden", `#/woche/<week>/einkauf`; settings: pantry editor (one name per line).
 
