@@ -492,3 +492,38 @@ img.thumb {
   flex: 1;
   min-width: 0;
 }
+
+/* ratings (M6) */
+.rating-line {
+  font-weight: 600;
+}
+
+.stars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.stars button {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.2rem 0.6rem;
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.stars button.never {
+  font-size: 1rem;
+}
+
+.stars button.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.stars button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}

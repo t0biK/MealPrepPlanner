@@ -23,7 +23,7 @@ class DbTest(unittest.TestCase):
         db.migrate(self.conn)
         self.assertEqual(self.version(), len(db.MIGRATIONS))
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertLessEqual({"settings", "users", "tags", "recipes", "ingredients", "recipe_tags", "import_jobs"}, tables)
+        self.assertLessEqual({"settings", "users", "tags", "recipes", "ingredients", "recipe_tags", "import_jobs", "ratings"}, tables)
 
     def test_settings_defaults(self):
         self.assertEqual(db.get_settings(self.conn), {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2,

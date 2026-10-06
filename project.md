@@ -745,7 +745,7 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 **Acceptance**
 - [ ] Two household members rate 10 recipes each on their phones; each sees the other's stars by name (manual, phone, 2 accounts).
 - [ ] An unrated recipe sharing tags with highly rated recipes shows a higher "Prognose" than one sharing tags with low-rated recipes (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M7 – Week planner
 

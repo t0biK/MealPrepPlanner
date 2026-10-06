@@ -194,6 +194,58 @@ function chips(names) {
   return el("div", { className: "chips" }, ...names.map((n) => el("span", { className: "chip", textContent: n })));
 }
 
+const fmtScore = (n) => n.toLocaleString(document.documentElement.lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+// household average, own stars and veto badge of a recipe card
+function ratingLine(r) {
+  return el("p", { className: "rating-line" },
+    t("rating.household", { score: fmtScore(r.household_score) }) + " · " +
+      (r.my_stars == null ? t("rating.mine_none") : t("rating.mine", { n: r.my_stars })),
+    ...(r.vetoed ? [" ", el("span", { className: "badge fail", textContent: t("rating.vetoed") })] : []));
+}
+
+// 1-5 stars and "never again" (0); tapping the current value clears the rating
+function starWidget(id, current, onChange) {
+  const set = async (n) => {
+    try {
+      onChange(await api("PUT", `api/recipes/${id}/rating`, { stars: n === current ? null : n }));
+    } catch (e) {
+      toast(errorText(e));
+    }
+  };
+  const star = (n) => {
+    const b = el("button", { type: "button", className: "star" + (current != null && n <= current ? " on" : ""),
+      textContent: "★", ariaLabel: t("rating.stars", { n }), ariaPressed: String(current === n) });
+    b.onclick = () => set(n);
+    return b;
+  };
+  const never = el("button", { type: "button", className: "never" + (current === 0 ? " on" : ""),
+    textContent: t("rating.never_button"), ariaLabel: t("rating.never"), ariaPressed: String(current === 0) });
+  never.onclick = () => set(0);
+  return el("div", { className: "stars" }, ...[1, 2, 3, 4, 5].map(star), never);
+}
+
+function ratingCard(id, r) {
+  const box = card(null);
+  const show = (info) => {
+    box.replaceChildren(
+      el("h2", { textContent: t("rating.title") }),
+      el("p", {}, t("rating.household", { score: fmtScore(info.household_score) }) + " ",
+        ...(info.vetoed ? [el("span", { className: "badge fail", textContent: t("rating.vetoed") })] : [])),
+      info.ratings.length
+        ? el("ul", { className: "plain" }, ...info.ratings.map((x) => el("li", {
+          textContent: t(x.stars === 0 ? "rating.person_never" : "rating.person", { name: x.display_name, n: x.stars }) })))
+        : el("p", { className: "muted", textContent: t("rating.nobody") }),
+      el("h2", { textContent: t("rating.yours") }),
+      starWidget(id, info.my_stars, show),
+      el("p", { className: "muted", textContent: t("rating.hint") }),
+      ...(info.my_prediction != null
+        ? [el("p", {}, el("strong", { textContent: t("rating.prediction", { score: fmtScore(info.my_prediction) }) }))] : []));
+  };
+  show(r);
+  return box;
+}
+
 function mealInfo(r) {
   return [
     r.total_minutes ? t("recipes.minutes", { n: r.total_minutes }) : "",
@@ -211,9 +263,13 @@ async function pageRecipes(app) {
   const tagSel = el("select", { ariaLabel: t("form.tags") }, option("", t("recipes.all_tags"), true),
     ...tags.map((x) => option(x.name, x.name, false)));
   const archive = el("input", { type: "checkbox" });
+  const sortSel = el("select", { ariaLabel: t("recipes.sort") },
+    ...["title", "score", "new"].map((k) => option(k, t(`recipes.sort.${k}`), k === "title")));
+  const unrated = el("input", { type: "checkbox" });
 
   const load = async () => {
-    const qs = new URLSearchParams({ q: search.value, tag: tagSel.value, archived: archived ? 1 : 0 });
+    const qs = new URLSearchParams({ q: search.value, tag: tagSel.value, archived: archived ? 1 : 0, sort: sortSel.value });
+    if (unrated.checked) qs.set("filter", "unrated_by_me");
     try {
       const items = await api("GET", "api/recipes?" + qs);
       list.replaceChildren(...(items.length
@@ -221,6 +277,7 @@ async function pageRecipes(app) {
           ...image(r.image),
           el("h2", { textContent: r.title }),
           el("p", { className: "muted", textContent: mealInfo(r) }),
+          ratingLine(r),
           chips(r.tags)))
         : [el("p", { className: "muted", textContent: t("recipes.empty") })]));
     } catch (e) {
@@ -233,6 +290,8 @@ async function pageRecipes(app) {
     timer = setTimeout(load, 250);
   };
   tagSel.onchange = load;
+  sortSel.onchange = load;
+  unrated.onchange = load;
   archive.onchange = () => {
     archived = archive.checked;
     load();
@@ -241,7 +300,8 @@ async function pageRecipes(app) {
   app.replaceChildren(
     el("div", { className: "row" }, el("h1", { textContent: t("recipes.title") }),
       el("a", { className: "btn", href: "#/rezepte/neu", textContent: t("recipes.new") })),
-    card(null, search, tagSel, el("label", { className: "row" }, t("recipes.archive"), archive)),
+    card(null, search, tagSel, sortSel, el("label", { className: "row" }, t("recipes.unrated_by_me"), unrated),
+      el("label", { className: "row" }, t("recipes.archive"), archive)),
     list);
   await load();
 }
@@ -293,6 +353,7 @@ async function pageRecipe(app, id) {
     ...(r.archived ? [el("p", {}, el("span", { className: "badge", textContent: t("recipe.archived") }))] : []),
     el("p", { className: "muted", textContent: mealInfo(r) }),
     chips(r.tags),
+    ratingCard(id, r),
     card(t("recipe.ingredients"),
       el("div", { className: "row" }, t("recipe.portions"), el("div", { className: "stepper" }, minus, count, plus)),
       r.ingredients.length ? ingredients : el("p", { className: "muted", textContent: t("recipe.no_ingredients") })),

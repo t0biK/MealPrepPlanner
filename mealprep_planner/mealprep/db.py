@@ -83,6 +83,15 @@ MIGRATIONS = [
       CHECK (url IS NOT NULL OR text IS NOT NULL)
     );
     """,
+    """
+    CREATE TABLE ratings (
+      user_id    TEXT NOT NULL REFERENCES users(id),
+      recipe_id  INTEGER NOT NULL REFERENCES recipes(id),
+      stars      INTEGER NOT NULL CHECK (stars BETWEEN 0 AND 5),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, recipe_id)
+    );
+    """,
 ]
 
 DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None}

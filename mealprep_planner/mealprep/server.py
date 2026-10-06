@@ -261,8 +261,15 @@ def api_list_recipes(h, m):
     archived = qs.get("archived", ["0"])[0]
     if archived not in ("0", "1"):
         raise db.InvalidField("archived")
+    sort = qs.get("sort", ["title"])[0]
+    if sort not in recipes.SORTS:
+        raise db.InvalidField("sort")
+    unrated = qs.get("filter", [""])[0]
+    if unrated not in ("", "unrated_by_me"):
+        raise db.InvalidField("filter")
     h.send_json(200, recipes.list_recipes(
-        h.conn, qs.get("q", [""])[0], qs.get("tag", [""])[0], archived == "1"))
+        h.conn, qs.get("q", [""])[0], qs.get("tag", [""])[0], archived == "1",
+        user_id=h.user["id"], sort=sort, unrated_by_me=unrated == "unrated_by_me"))
 
 
 def api_create_recipe(h, m):
@@ -271,7 +278,18 @@ def api_create_recipe(h, m):
 
 
 def api_get_recipe(h, m):
-    h.send_json(200, _recipe_or_404(h, m))
+    recipe = _recipe_or_404(h, m)
+    h.send_json(200, {**recipe, **recipes.rating_info(h.conn, recipe["id"], h.user["id"])})
+
+
+def api_put_rating(h, m):
+    stars = _body_dict(h).get("stars", "?")
+    if stars is not None and (not isinstance(stars, int) or isinstance(stars, bool) or not 0 <= stars <= 5):
+        raise db.InvalidField("stars")
+    recipe_id = int(m.group(1))
+    if not recipes.set_rating(h.conn, h.user["id"], recipe_id, stars):
+        raise ApiError(404, "not_found")
+    h.send_json(200, recipes.rating_info(h.conn, recipe_id, h.user["id"]))
 
 
 def api_update_recipe(h, m):
@@ -465,6 +483,7 @@ ROUTES = [
     ("POST", re.compile(r"^/api/recipes$"), api_create_recipe),
     ("GET", re.compile(r"^/api/recipes/(\d+)$"), api_get_recipe),
     ("PUT", re.compile(r"^/api/recipes/(\d+)$"), api_update_recipe),
+    ("PUT", re.compile(r"^/api/recipes/(\d+)/rating$"), api_put_rating),
     ("POST", re.compile(r"^/api/recipes/(\d+)/archive$"), _set_archived(True)),
     ("POST", re.compile(r"^/api/recipes/(\d+)/restore$"), _set_archived(False)),
     ("GET", re.compile(r"^/api/tags$"), api_list_tags),

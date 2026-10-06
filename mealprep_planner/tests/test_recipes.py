@@ -253,6 +253,27 @@ class StoreTest(unittest.TestCase):
         self.make(ingredients=[{"name": "Zucker"}, {"name": "mehl"}, {"name": "Butter"}])
         self.assertEqual(recipes.known_ingredient_names(self.conn), ["Äpfel", "Butter", "Mehl", "zucker"])
 
+    def test_ratings_per_person(self):
+        self.conn.execute("INSERT INTO users VALUES ('v', 'm', 'Mia', NULL, 'now', 'now')")
+        self.conn.commit()
+        a, b = self.make(title="A"), self.make(title="B", tags=["Suppe"])
+        self.assertTrue(recipes.set_rating(self.conn, "u", a, 4))
+        self.assertTrue(recipes.set_rating(self.conn, "v", a, 2))
+        self.assertTrue(recipes.set_rating(self.conn, "v", a, 0))  # replaces, no second row
+        self.assertFalse(recipes.set_rating(self.conn, "u", 9999, 3))
+        info = recipes.rating_info(self.conn, a, "u")
+        self.assertEqual(info["ratings"], [{"user_id": "v", "display_name": "Mia", "stars": 0},
+                                           {"user_id": "u", "display_name": "N", "stars": 4}])
+        self.assertEqual((info["my_stars"], info["my_prediction"], info["vetoed"], info["household_score"]), (4, None, True, 2))
+        self.assertIsNotNone(recipes.rating_info(self.conn, b, "u")["my_prediction"])
+        self.assertTrue(recipes.set_rating(self.conn, "v", a, None))
+        self.assertEqual([r["user_id"] for r in recipes.rating_info(self.conn, a, "u")["ratings"]], ["u"])
+        listed = {r["id"]: r for r in recipes.list_recipes(self.conn, user_id="v")}
+        self.assertEqual((listed[a]["my_stars"], listed[b]["my_stars"]), (None, None))
+        self.assertEqual([r["id"] for r in recipes.list_recipes(self.conn, user_id="u", unrated_by_me=True)], [b])
+        with self.assertRaises(Exception):  # unknown user: foreign key
+            recipes.set_rating(self.conn, "nobody", a, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

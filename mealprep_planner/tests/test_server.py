@@ -112,6 +112,45 @@ class DevServerTest(unittest.TestCase):
         bad = {"format_version": 1, "title": "x", "servings": 1, "image": "a" * 64 + ".jpg"}
         self.assertEqual(self.call("POST", "/api/recipes", bad)[1]["field"], "image")
 
+    def test_rating_lifecycle_and_recipe_fields(self):
+        mk = lambda title, tags: self.call("POST", "/api/recipes", {"format_version": 1, "title": title, "servings": 2, "tags": tags})[1]["id"]
+        a, b, c, d = mk("Rating A", ["Nudeln"]), mk("Rating B", ["Nudeln"]), mk("Rating C", ["Suppe"]), mk("Rating D", ["Suppe"])
+        detail = lambda rid: self.call("GET", f"/api/recipes/{rid}")[1]
+        self.assertEqual((detail(a)["ratings"], detail(a)["my_stars"], detail(a)["vetoed"]), ([], None, False))
+        self.assertIsNotNone(detail(a)["my_prediction"])
+
+        status, info = self.call("PUT", f"/api/recipes/{a}/rating", {"stars": 5})
+        self.assertEqual((status, info["my_stars"], info["my_prediction"], info["vetoed"]), (200, 5, None, False))
+        self.assertEqual([(r["user_id"], r["stars"]) for r in info["ratings"]], [("dev", 5)])
+        self.call("PUT", f"/api/recipes/{d}/rating", {"stars": 1})
+        self.assertGreater(detail(b)["my_prediction"], detail(c)["my_prediction"])  # b shares the tag of a well-rated recipe
+        self.assertEqual(self.call("PUT", f"/api/recipes/{a}/rating", {"stars": 3})[1]["my_stars"], 3)  # one current rating
+        self.assertEqual(len(detail(a)["ratings"]), 1)
+
+        info = self.call("PUT", f"/api/recipes/{b}/rating", {"stars": 0})[1]
+        self.assertEqual((info["my_stars"], info["vetoed"]), (0, True))  # 0 is a veto, not "unrated"
+        listed = {r["id"]: r for r in self.call("GET", "/api/recipes")[1]}
+        self.assertEqual((listed[a]["my_stars"], listed[b]["my_stars"], listed[c]["my_stars"]), (3, 0, None))
+        self.assertEqual((listed[b]["vetoed"], listed[a]["vetoed"]), (True, False))
+        self.assertEqual(listed[a]["household_score"], 3)
+        ids = lambda qs: [r["id"] for r in self.call("GET", "/api/recipes?" + qs)[1] if r["id"] in (a, b, c, d)]
+        self.assertEqual(ids("filter=unrated_by_me"), [c])
+        self.assertEqual(ids("sort=score"), [a, c, d, b])
+        self.assertEqual(ids("sort=new"), [d, c, b, a])
+        self.assertEqual(ids("sort=title"), [a, b, c, d])
+
+        info = self.call("PUT", f"/api/recipes/{a}/rating", {"stars": None})[1]  # tap again: cleared
+        self.assertEqual((info["my_stars"], info["ratings"]), (None, []))
+        self.assertEqual(ids("filter=unrated_by_me"), [a, c])
+
+    def test_rating_errors(self):
+        rid = self.call("POST", "/api/recipes", {"format_version": 1, "title": "Rating Err", "servings": 2})[1]["id"]
+        for bad in ({}, {"stars": 6}, {"stars": -1}, {"stars": "3"}, {"stars": True}, {"stars": 2.5}):
+            self.assertEqual(self.call("PUT", f"/api/recipes/{rid}/rating", bad), (400, {"error": "invalid_field", "field": "stars"}))
+        self.assertEqual(self.call("PUT", "/api/recipes/999999/rating", {"stars": 3})[0], 404)
+        self.assertEqual(self.call("GET", "/api/recipes?sort=best")[1]["field"], "sort")
+        self.assertEqual(self.call("GET", "/api/recipes?filter=x")[1]["field"], "filter")
+
     def test_tag_crud(self):
         status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})
         self.assertEqual(status, 201)

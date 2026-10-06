@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import db
+from . import db, planner
 from .ingredients import UNITS
 
 SOURCE_KINDS = ("manual", "web", "tiktok", "youtube", "instagram", "text")
@@ -286,12 +286,23 @@ def get_recipe(conn, recipe_id):
     }
 
 
-def list_recipes(conn, q="", tag="", archived=False):
-    """Summaries sorted by title; q matches title or ingredient names (case-insensitive, also umlauts)."""
-    q = q.strip().casefold()
+def _tag_map(conn):
     tags = {}
     for row in conn.execute("SELECT recipe_id, name FROM recipe_tags JOIN tags ON tag_id = id ORDER BY name COLLATE NOCASE"):
         tags.setdefault(row["recipe_id"], []).append(row["name"])
+    return tags
+
+
+SORTS = ("title", "score", "new")
+
+
+def list_recipes(conn, q="", tag="", archived=False, user_id=None, sort="title", unrated_by_me=False):
+    """Summaries; q matches title or ingredient names (case-insensitive, also umlauts).
+    sort: title (A-Z), score (household score, best first), new (newest first)."""
+    q = q.strip().casefold()
+    tags = _tag_map(conn)
+    ratings = all_ratings(conn)
+    model = taste_model(conn, ratings, tags)
     names = {}
     if q:
         for row in conn.execute("SELECT recipe_id, name FROM ingredients"):
@@ -305,9 +316,19 @@ def list_recipes(conn, q="", tag="", archived=False):
             continue
         if q and q not in r["title"].casefold() and not any(q in n for n in names.get(r["id"], [])):
             continue
+        my_stars = ratings.get(user_id, {}).get(r["id"])
+        if unrated_by_me and my_stars is not None:
+            continue
         out.append({"id": r["id"], "title": r["title"], "image": r["image"], "total_minutes": r["total_minutes"],
-                    "for_lunch": bool(r["for_lunch"]), "for_dinner": bool(r["for_dinner"]), "tags": recipe_tags})
-    return sorted(out, key=lambda r: sort_key(r["title"]))
+                    "for_lunch": bool(r["for_lunch"]), "for_dinner": bool(r["for_dinner"]), "tags": recipe_tags,
+                    "household_score": planner.household_score(model, r["id"])[0], "my_stars": my_stars,
+                    "vetoed": planner.is_vetoed(model, r["id"])})
+    out.sort(key=lambda r: sort_key(r["title"]))
+    if sort == "score":
+        out.sort(key=lambda r: -r["household_score"])  # stable: ties stay in title order
+    elif sort == "new":
+        out.sort(key=lambda r: -r["id"])
+    return out
 
 
 def set_archived(conn, recipe_id, archived):
@@ -329,3 +350,51 @@ def top_ingredient_names(conn, limit):
     return [r["name"] for r in conn.execute(
         "SELECT name FROM ingredients GROUP BY name COLLATE NOCASE ORDER BY COUNT(*) DESC, name COLLATE NOCASE LIMIT ?",
         (limit,))]
+
+
+# ---- ratings (M6) ----
+
+def all_ratings(conn):
+    """{user_id: {recipe_id: stars}}"""
+    out = {}
+    for row in conn.execute("SELECT user_id, recipe_id, stars FROM ratings"):
+        out.setdefault(row["user_id"], {})[row["recipe_id"]] = row["stars"]
+    return out
+
+
+def taste_model(conn, ratings=None, tags=None):
+    """Prediction model over all known users (the users table)."""
+    users = [r["id"] for r in conn.execute("SELECT id FROM users")]
+    return planner.build_model(users, all_ratings(conn) if ratings is None else ratings,
+                               _tag_map(conn) if tags is None else tags)
+
+
+def set_rating(conn, user_id, recipe_id, stars):
+    """stars 0-5 stores the user's current rating, None clears it. Returns False if the recipe does not exist."""
+    with conn:
+        if conn.execute("SELECT 1 FROM recipes WHERE id = ?", (recipe_id,)).fetchone() is None:
+            return False
+        if stars is None:
+            conn.execute("DELETE FROM ratings WHERE user_id = ? AND recipe_id = ?", (user_id, recipe_id))
+        else:
+            conn.execute(
+                "INSERT INTO ratings (user_id, recipe_id, stars, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, recipe_id) DO UPDATE SET stars = excluded.stars, updated_at = excluded.updated_at",
+                (user_id, recipe_id, stars, _now()))
+    return True
+
+
+def rating_info(conn, recipe_id, user_id):
+    """Rating fields of the recipe page: ratings per person, own stars and prediction, household score, veto."""
+    model = taste_model(conn)
+    score, details = planner.household_score(model, recipe_id)
+    my_stars = model["ratings"].get(user_id, {}).get(recipe_id)
+    return {
+        "ratings": [{"user_id": r["user_id"], "display_name": r["display_name"], "stars": r["stars"]} for r in conn.execute(
+            "SELECT user_id, display_name, stars FROM ratings JOIN users ON users.id = user_id WHERE recipe_id = ? "
+            "ORDER BY display_name COLLATE NOCASE", (recipe_id,))],
+        "my_stars": my_stars,
+        "my_prediction": planner.predict(model, user_id, recipe_id) if my_stars is None and user_id in details else None,
+        "household_score": score,
+        "vetoed": planner.is_vetoed(model, recipe_id),
+    }
