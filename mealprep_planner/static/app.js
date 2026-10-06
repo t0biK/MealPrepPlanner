@@ -68,13 +68,14 @@ async function loadLang() {
   document.title = t("app.title");
 }
 
-function renderChrome(route) {
+function renderChrome(route, reviewCount = 0) {
   document.getElementById("top").textContent = "🍽️ " + t("app.title");
-  const tab = (href, icon, label, active) =>
-    el("a", { href, ...(active ? { ariaCurrent: "page" } : {}) }, el("span", { textContent: icon }), label);
+  const tab = (href, icon, label, active, count = 0) =>
+    el("a", { href, ...(active ? { ariaCurrent: "page" } : {}) }, el("span", { textContent: icon }), label,
+      ...(count ? [el("b", { className: "count", textContent: count, ariaLabel: t("nav.review_count", { count }) })] : []));
   document.getElementById("nav").replaceChildren(
     tab("#/rezepte", "🍲", t("nav.recipes"), route === "rezepte"),
-    tab("#/import", "📥", t("nav.import"), route === "import"),
+    tab("#/import", "📥", t("nav.import"), route === "import", reviewCount),
     tab("#/einstellungen", "⚙️", t("nav.settings"), route === "einstellungen" || route === "systemcheck"),
   );
 }
@@ -126,6 +127,7 @@ async function pageSettings(app) {
     card(t("settings.default_portions"), portions),
     await tagEditor(),
     card(t("settings.bring"), await entityPicker("todo", "bring_entity")),
+    card(t("settings.inbox"), await entityPicker("todo", "inbox_entity")),
     card(t("settings.ai"),
       el("label", { className: "row" }, t("settings.ai_enabled"), aiEnabled),
       await entityPicker("ai_task", "ai_entity")),
@@ -510,7 +512,9 @@ async function pageImport(app) {
         return card(null,
           el("div", { className: "row" },
             j.status === "review" ? el("a", { href: "#/import/" + j.id, textContent: label }) : el("span", { textContent: label }),
-            el("span", { className: "badge " + (j.status === "failed" ? "fail" : ""), textContent: t(`import.status.${j.status}`) })),
+            el("span", {},
+              ...(j.origin === "inbox" ? [el("span", { className: "badge", textContent: t("import.inbox") }), " "] : []),
+              el("span", { className: "badge " + (j.status === "failed" ? "fail" : ""), textContent: t(`import.status.${j.status}`) }))),
           ...(j.error ? [el("p", { className: "muted", textContent: t(`error.${j.error}`) })] : []),
           ...(j.status === "failed" ? [jobActions(j, "#/import")] : []));
       }) : [el("p", { className: "muted", textContent: t("import.empty") })]));
@@ -555,6 +559,7 @@ async function pageImportJob(app, id) {
     el("a", { href: "#/import", textContent: t("import.back") }),
     el("h1", { textContent: t("import.title") }),
     card(null, el("p", { textContent: job.title || job.url || t("import.text_job") }),
+      ...(job.origin === "inbox" ? [el("span", { className: "badge", textContent: t("import.inbox") }), " "] : []),
       el("span", { className: "badge", textContent: t(`import.status.${job.status}`) }),
       ...(job.error ? [el("p", { className: "muted", textContent: t(`error.${job.error}`) })] : []),
       ...(job.status === "failed" ? [jobActions(job, "#/import")] : [])));
@@ -629,7 +634,8 @@ async function render() {
     await loadLang();
     const found = routePage(parts);
     if (!found) return location.replace("#/rezepte");
-    renderChrome(found[0]);
+    const review = await api("GET", "api/imports?status=review").catch(() => []);
+    renderChrome(found[0], review.length);
     await found[1](app);
   } catch (e) {
     app.textContent = strings["error.generic"] ? errorText(e) : "Error";

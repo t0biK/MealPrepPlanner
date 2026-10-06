@@ -718,7 +718,7 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 - [ ] Android: share a TikTok video → "Home Assistant" → draft appears in the app within 2 min; the inbox list is empty afterwards (manual, phone).
 - [ ] iPhone: share a Chefkoch link from Safari and an Instagram post → drafts appear (manual, phone).
 - [ ] Sharing plain recipe text creates a text draft (manual, phone).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M6 – Ratings and taste prediction
 

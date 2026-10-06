@@ -361,7 +361,7 @@ def _set_job(h, job_id, status, allowed_from):
         raise ApiError(400, "bad_request")
 
 
-MAX_TEXT = 20000
+MAX_TEXT = worker.MAX_TEXT
 
 
 def _pasted_text(body):

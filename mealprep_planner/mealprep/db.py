@@ -85,8 +85,8 @@ MIGRATIONS = [
     """,
 ]
 
-DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2}
-ENTITY_DOMAIN = {"bring_entity": "todo", "ai_entity": "ai_task"}
+DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None}
+ENTITY_DOMAIN = {"bring_entity": "todo", "ai_entity": "ai_task", "inbox_entity": "todo"}
 
 
 class InvalidField(ValueError):
@@ -149,6 +149,9 @@ def set_settings(conn, patch):
     """Validate the whole patch first, then store it; defaults live in code, so only changes are stored."""
     for key, value in patch.items():
         _validate(key, value)
+    merged = {**get_settings(conn), **patch}
+    if merged["inbox_entity"] is not None and merged["inbox_entity"] == merged["bring_entity"]:
+        raise InvalidField("inbox_entity" if "inbox_entity" in patch else "bring_entity")
     with conn:
         for key, value in patch.items():
             if value == DEFAULTS[key]:

@@ -1,0 +1,39 @@
+blueprint:
+  name: MealPrep Planner – Share to Rezept-Inbox
+  description: >-
+    Puts links and texts shared from the Home Assistant companion app (Android and iOS share sheet)
+    onto a To-do list. MealPrep Planner reads that list and turns every entry into a recipe draft.
+  domain: automation
+  source_url: https://github.com/t0biK/MealPrepPlanner/blob/main/blueprints/automation/mealprep_planner/share_to_inbox.yaml
+  input:
+    inbox:
+      name: Rezept-Inbox
+      description: The Local To-do list that MealPrep Planner reads (not the Bring! list).
+      selector:
+        entity:
+          filter:
+            - domain: todo
+
+mode: queued
+max_exceeded: silent
+
+triggers:
+  - trigger: event
+    event_type: mobile_app.share
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ (trigger.event.data.url | default('', true) | string | trim) != ''
+         or (trigger.event.data.text | default('', true) | string | trim) != '' }}
+
+actions:
+  - action: todo.add_item
+    target:
+      entity_id: !input inbox
+    data:
+      item: >-
+        {%- set url = trigger.event.data.url | default('', true) | string | trim -%}
+        {%- set text = trigger.event.data.text | default('', true) | string | trim -%}
+        {{ url if url else text[:250] }}
+      description: "{{ trigger.event.data.text | default('', true) | string | trim }}"

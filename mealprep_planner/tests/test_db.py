@@ -26,7 +26,8 @@ class DbTest(unittest.TestCase):
         self.assertLessEqual({"settings", "users", "tags", "recipes", "ingredients", "recipe_tags", "import_jobs"}, tables)
 
     def test_settings_defaults(self):
-        self.assertEqual(db.get_settings(self.conn), {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2})
+        self.assertEqual(db.get_settings(self.conn), {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2,
+                                                      "inbox_entity": None})
 
     def test_invalid_values_rejected(self):
         for patch, field in [
@@ -47,6 +48,21 @@ class DbTest(unittest.TestCase):
             s = db.set_settings(self.conn, {"bring_entity": "todo.bring", "ai_enabled": False})
         self.assertEqual(s["bring_entity"], "todo.bring")
         self.assertFalse(db.get_settings(self.conn)["ai_enabled"])
+
+    def test_inbox_entity_must_be_a_todo_list_other_than_bring(self):
+        with self.assertRaises(db.InvalidField) as cm:
+            db.set_settings(self.conn, {"inbox_entity": "ai_task.x"})
+        self.assertEqual(cm.exception.field, "inbox_entity")
+        with mock.patch.object(ha, "get_state", return_value={}):
+            db.set_settings(self.conn, {"bring_entity": "todo.bring", "inbox_entity": "todo.inbox"})
+            for patch, field in [({"inbox_entity": "todo.bring"}, "inbox_entity"),
+                                 ({"bring_entity": "todo.inbox"}, "bring_entity"),
+                                 ({"bring_entity": "todo.x", "inbox_entity": "todo.x"}, "inbox_entity")]:
+                with self.assertRaises(db.InvalidField) as cm:
+                    db.set_settings(self.conn, patch)
+                self.assertEqual(cm.exception.field, field)
+            self.assertIsNone(db.set_settings(self.conn, {"inbox_entity": None})["inbox_entity"])
+            self.assertEqual(db.get_settings(self.conn)["bring_entity"], "todo.bring")
 
     def test_user_upsert_and_lang(self):
         user = {"id": "u1", "name": "n", "display_name": "N"}
