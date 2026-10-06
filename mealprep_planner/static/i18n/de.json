@@ -1,0 +1,6 @@
+{
+  "app.title": "MealPrep Planner",
+  "app.running": "MealPrep Planner läuft · Version {version}",
+  "app.hello": "Hallo {name}",
+  "error.generic": "Etwas ist schiefgelaufen."
+}

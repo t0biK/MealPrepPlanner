@@ -593,8 +593,8 @@ Every milestone: bump `VERSION` (and from M1 `config.yaml`) to `0.<n>.0`; every 
 - `tests/test_stdlib_only.py`: every import in `mealprep/*.py` (via `ast`) is in `sys.stdlib_module_names` or is `mealprep`.
 
 **Acceptance**
-- [ ] `py -3.13 -m mealprep` starts; http://127.0.0.1:8099/ shows "Hallo Dev" with a German browser language and "Hello Dev" with English (manual).
-- [ ] `py -3.13 -m unittest discover -s tests -v` passes.
+- [x] `py -3.13 -m mealprep` starts; http://127.0.0.1:8099/ shows "Hallo Dev" with a German browser language and "Hello Dev" with English (manual).
+- [x] `py -3.13 -m unittest discover -s tests -v` passes.
 - [ ] Ctrl+C stops the server within 2 s (manual).
 
 ### M1 – HA app, Ingress and HA connection spike
