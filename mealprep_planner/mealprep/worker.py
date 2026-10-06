@@ -5,14 +5,17 @@ import time
 import traceback
 from datetime import datetime, timedelta
 
-from . import db, ha, importer, recipes
+from . import db, ha, importer, plans, planner, recipes
 
 INBOX_INTERVAL = 60  # seconds between inbox polls
 INBOX_MAX_URLS = 10  # per inbox item
 INBOX_MIN_TEXT = 20  # shorter text without a link is not a recipe
 INBOX_DEDUPE = timedelta(hours=1)
+SENSOR_INTERVAL = 300  # seconds between sensor posts (and right after a plan change)
+SENSOR_ENTITY = "sensor.essensplan"
 MAX_TEXT = 20000
 URL_RE = re.compile(r"""https?://[^\s<>"']+""")
+plan_changed = threading.Event()  # set by the API after a plan change; the worker then posts the sensor
 
 
 def _now():
@@ -120,18 +123,42 @@ def poll_inbox(data_dir):
         conn.close()
 
 
+def notify_plan_changed():
+    plan_changed.set()
+
+
+def post_sensor(data_dir):
+    """Post sensor.essensplan; a failure is logged, never raised."""
+    try:
+        conn = db.connect(data_dir)
+        try:
+            now = datetime.now()
+            state, attributes = planner.sensor_payload(plans.sensor_slots(conn, now.date()), now)
+        finally:
+            conn.close()
+        ha.post_state(SENSOR_ENTITY, state, attributes)
+    except ha.HAError as e:
+        print(f"sensor post failed: {e}", flush=True)
+    except Exception:
+        traceback.print_exc()
+
+
 def run(data_dir):
     conn = db.connect(data_dir)
     try:
         reset_running(conn)
     finally:
         conn.close()
-    next_poll = 0
+    next_poll = next_sensor = 0
     while True:
         try:
             if time.monotonic() >= next_poll:
                 next_poll = time.monotonic() + INBOX_INTERVAL
                 poll_inbox(data_dir)
+            if plan_changed.is_set() or time.monotonic() >= next_sensor:
+                plan_changed.clear()
+                next_sensor = time.monotonic() + SENSOR_INTERVAL
+                post_sensor(data_dir)
             if process_one(data_dir):
                 continue
         except Exception:

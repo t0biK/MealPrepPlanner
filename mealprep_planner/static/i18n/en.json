@@ -201,5 +201,15 @@
   "shopping.status.pushed": "Sent",
   "settings.pantry": "Pantry",
   "settings.pantry_hint": "One name per line. These ingredients are never sent to Bring!.",
-  "error.bring_failed": "Bring! is not reachable or no list is chosen."
+  "error.bring_failed": "Bring! is not reachable or no list is chosen.",
+  "today.title": "Today",
+  "today.today": "Today",
+  "today.tomorrow": "Tomorrow",
+  "today.nothing": "Nothing planned.",
+  "today.portions": "{n} servings",
+  "today.rate": "How was it?",
+  "today.rate_hint": "Rate what was on the table recently.",
+  "today.rate_empty": "All rated.",
+  "today.add_link": "Add link",
+  "today.link_added": "Importing the link."
 }

@@ -74,6 +74,7 @@ function renderChrome(route, reviewCount = 0) {
     el("a", { href, ...(active ? { ariaCurrent: "page" } : {}) }, el("span", { textContent: icon }), label,
       ...(count ? [el("b", { className: "count", textContent: count, ariaLabel: t("nav.review_count", { count }) })] : []));
   document.getElementById("nav").replaceChildren(
+    tab("#/", "🏠", t("nav.today"), route === "heute"),
     tab("#/woche", "📅", t("nav.week"), route === "woche"),
     tab("#/rezepte", "🍲", t("nav.recipes"), route === "rezepte"),
     tab("#/import", "📥", t("nav.import"), route === "import", reviewCount),
@@ -343,10 +344,14 @@ async function pageRecipes(app) {
   await load();
 }
 
-async function pageRecipe(app, id) {
+// link to a recipe page; the portions stepper starts at `portions` (a plan slot's) instead of the recipe's servings
+const recipeHref = (id, portions) => `#/rezepte/${id}?p=${portions}`;
+
+async function pageRecipe(app, id, query = "") {
   await loadUnits();
   const r = await api("GET", "api/recipes/" + id);
-  let portions = r.servings;
+  const wanted = Number(new URLSearchParams(query).get("p"));
+  let portions = Number.isInteger(wanted) && wanted >= 1 && wanted <= 50 ? wanted : r.servings;
 
   const count = el("strong", { textContent: portions });
   const minus = el("button", { textContent: "−", ariaLabel: "−" });
@@ -752,6 +757,53 @@ async function pageWeek(app, week) {
   show();
 }
 
+// ---- today page (M9) ----
+
+async function pageToday(app) {
+  const data = await api("GET", "api/today");
+  const dayText = (iso) => parseDate(iso).toLocaleDateString(document.documentElement.lang,
+    { weekday: "long", day: "numeric", month: "numeric" });
+  const mealRow = (meal, s) => el("div", { className: "row" },
+    el("strong", { textContent: t(meal === "lunch" ? "form.lunch" : "form.dinner") }),
+    s ? el("span", {}, el("a", { href: recipeHref(s.recipe_id, s.portions), textContent: s.title }), " ",
+      el("span", { className: "muted", textContent: t("today.portions", { n: s.portions }) }))
+      : el("span", { className: "muted", textContent: "–" }));
+  const dayCard = (label, d) => card(`${t(label)} · ${dayText(d.date)}`,
+    ...(d.lunch || d.dinner ? [mealRow("lunch", d.lunch), mealRow("dinner", d.dinner)]
+      : [el("p", { className: "muted", textContent: t("today.nothing") })]));
+
+  // "Wie war's?": rating a recipe removes it from the list
+  let rate = data.rate;
+  const rateList = el("ul", { className: "plain" });
+  const showRate = () => rateList.replaceChildren(...(rate.length ? rate.map((x) => el("li", {},
+    el("a", { href: "#/rezepte/" + x.recipe_id, textContent: x.title }),
+    el("p", { className: "muted", textContent: `${dayText(x.date)} · ${t(x.meal === "lunch" ? "form.lunch" : "form.dinner")}` }),
+    starWidget(x.recipe_id, null, () => {
+      rate = rate.filter((y) => y !== x);
+      showRate();
+    }))) : [el("li", { className: "muted", textContent: t("today.rate_empty") })]));
+  showRate();
+
+  const link = el("input", { type: "url", placeholder: t("import.link"), ariaLabel: t("today.add_link"), maxLength: 2048 });
+  const add = el("button", { type: "button", textContent: t("import.start") });
+  add.onclick = async () => {
+    try {
+      await api("POST", "api/imports", { url: link.value });
+      link.value = "";
+      toast(t("today.link_added"));
+    } catch (e) {
+      toast(errorText(e));
+    }
+  };
+
+  app.replaceChildren(
+    el("h1", { textContent: t("today.title") }),
+    dayCard("today.today", data.today),
+    dayCard("today.tomorrow", data.tomorrow),
+    card(t("today.rate"), el("p", { className: "muted", textContent: t("today.rate_hint") }), rateList),
+    card(t("today.add_link"), el("div", { className: "row" }, link, add)));
+}
+
 // ---- import (M3) ----
 
 function jobActions(job, after) {
@@ -897,8 +949,9 @@ async function tagEditor() {
 }
 
 // hash route -> [nav tab, page function]
-function routePage(parts) {
+function routePage(parts, query) {
   const [a, b, c] = parts;
+  if (!a) return ["heute", pageToday];
   if (a === "woche") {
     if (!b) return ["woche", async () => location.replace("#/woche/" + weekOf(new Date()))];
     if (/^\d{4}-W\d{2}$/.test(b) && !c) return ["woche", (app) => pageWeek(app, b)];
@@ -907,7 +960,7 @@ function routePage(parts) {
   if (a === "rezepte") {
     if (!b) return ["rezepte", pageRecipes];
     if (b === "neu" && !c) return ["rezepte", (app) => pageRecipeForm(app, null)];
-    if (/^\d+$/.test(b) && !c) return ["rezepte", (app) => pageRecipe(app, b)];
+    if (/^\d+$/.test(b) && !c) return ["rezepte", (app) => pageRecipe(app, b, query)];
     if (/^\d+$/.test(b) && c === "bearbeiten") return ["rezepte", (app) => pageRecipeForm(app, b)];
   }
   if (a === "import") {
@@ -921,12 +974,13 @@ function routePage(parts) {
 
 async function render() {
   const app = document.getElementById("app");
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
+  const parts = path.split("/").filter(Boolean);
   try {
     if (!me) me = await api("GET", "api/me");
     await loadLang();
-    const found = routePage(parts);
-    if (!found) return location.replace("#/rezepte");
+    const found = routePage(parts, query);
+    if (!found) return location.replace("#/");
     const review = await api("GET", "api/imports?status=review").catch(() => []);
     renderChrome(found[0], review.length);
     await found[1](app);

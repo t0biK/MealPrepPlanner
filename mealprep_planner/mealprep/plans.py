@@ -1,6 +1,6 @@
 """Week plans (M7): load/store plans and slots, run the pure planner on the stored data."""
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import db, planner, recipes
 
@@ -116,3 +116,53 @@ def slot_action(conn, week, day, meal, body, settings, rng, today):
             raise Refused(action)
         slot["skipped"] = action == "skip"
     _store(conn, week, slots)
+
+
+# ---- today page (M9) ----
+
+RATE_DAYS = 14  # "Wie war's?" looks back this many days before today
+RATE_MAX = 10
+
+
+def dated_slots(conn, days, confirmed_only=False):
+    """Filled, active, non-skipped slots on the given dates (any plan status unless confirmed_only), oldest first:
+    [{date, meal, recipe_id, title, image, portions}]. Never creates a plan."""
+    days = set(days)
+    weeks = sorted({planner.week_of(d) for d in days})
+    rows = conn.execute(
+        "SELECT s.week, s.day, s.meal, s.recipe_id, s.portions, r.title, r.image FROM plan_slots s "
+        "JOIN plans p ON p.week = s.week JOIN recipes r ON r.id = s.recipe_id "
+        f"WHERE s.week IN ({', '.join('?' * len(weeks))}) AND s.active = 1 AND s.skipped = 0"
+        + (" AND p.status = 'confirmed'" if confirmed_only else ""), weeks)
+    slots = [{"date": planner.week_dates(r["week"])[r["day"]], "meal": r["meal"], "recipe_id": r["recipe_id"],
+              "title": r["title"], "image": r["image"], "portions": r["portions"]} for r in rows]
+    return sorted((s for s in slots if s["date"] in days), key=lambda s: (s["date"], planner.MEALS.index(s["meal"])))
+
+
+def sensor_slots(conn, today):
+    """The slots sensor_payload needs: the current week and tomorrow."""
+    return dated_slots(conn, [*planner.week_dates(planner.week_of(today)), today + timedelta(days=1)])
+
+
+def rate_list(conn, user_id, today):
+    """[{recipe_id, title, date, meal}]: meals of the RATE_DAYS days before today (confirmed plans) whose recipe the
+    user has not rated; newest first, one entry per recipe, at most RATE_MAX."""
+    rated = {r["recipe_id"] for r in conn.execute("SELECT recipe_id FROM ratings WHERE user_id = ?", (user_id,))}
+    out, seen = [], set()
+    for s in reversed(dated_slots(conn, [today - timedelta(days=n) for n in range(1, RATE_DAYS + 1)], True)):
+        if s["recipe_id"] not in rated | seen:
+            seen.add(s["recipe_id"])
+            out.append({"recipe_id": s["recipe_id"], "title": s["title"], "date": s["date"].isoformat(), "meal": s["meal"]})
+    return out[:RATE_MAX]
+
+
+def today_view(conn, user_id, today):
+    """GET api/today: today's and tomorrow's meals (null = nothing planned) and the "Wie war's?" list."""
+    slots = dated_slots(conn, [today, today + timedelta(days=1)])
+
+    def day(d):
+        return {"date": d.isoformat(), **{meal: next(
+            ({k: s[k] for k in ("recipe_id", "title", "image", "portions")} for s in slots
+             if (s["date"], s["meal"]) == (d, meal)), None) for meal in planner.MEALS}}
+
+    return {"today": day(today), "tomorrow": day(today + timedelta(days=1)), "rate": rate_list(conn, user_id, today)}

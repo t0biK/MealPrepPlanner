@@ -3,6 +3,7 @@
 ratings: {user_id: {recipe_id: stars 0-5}}   tags: {recipe_id: [tag names]}   users: [user_id]
 recipes: [{id, for_lunch, for_dinner, archived, tags}]   history: [(recipe_id, date)]
 slot: {day 0-6, meal, active, recipe_id, portions, locked, skipped, reason}   plan: {week, slots: [slot x 14]}
+dated slot (sensor_payload): {date, meal, title}
 """
 import math
 import re
@@ -204,3 +205,30 @@ def day_totals(slots, nutrition):
         for key in NUTRIENTS:
             total[key] = round(total[key], 1)
     return totals
+
+
+# ---- HA sensor (M9) ----
+
+LUNCH_UNTIL, DINNER_UNTIL = 14, 21  # hours: the sensor shows today's lunch until 14:00, then the dinner until 21:00
+
+
+def sensor_payload(slots, now):
+    """(state, attributes) of sensor.essensplan (section 6). slots: dated slots (filled, active, non-skipped) that
+    cover at least tomorrow and the current week. State = title of the next meal, "–" if there is none."""
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    titles = {(s["date"], s["meal"]): s["title"] for s in slots}
+    state = next((titles[(today, meal)] for meal, until in zip(MEALS, (LUNCH_UNTIL, DINNER_UNTIL))
+                  if now.hour < until and (today, meal) in titles), None)
+    state = state or titles.get((tomorrow, "lunch")) or titles.get((tomorrow, "dinner")) or "–"
+    week = week_of(today)
+    return state[:255], {
+        "friendly_name": "Essensplan",
+        "icon": "mdi:silverware-fork-knife",
+        "today_lunch": titles.get((today, "lunch")),
+        "today_dinner": titles.get((today, "dinner")),
+        "tomorrow_lunch": titles.get((tomorrow, "lunch")),
+        "tomorrow_dinner": titles.get((tomorrow, "dinner")),
+        "week": [{"date": s["date"].isoformat(), "meal": s["meal"], "title": s["title"]}
+                 for s in sorted(slots, key=lambda s: (s["date"], MEALS.index(s["meal"]))) if week_of(s["date"]) == week],
+    }

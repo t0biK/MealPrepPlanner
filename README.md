@@ -21,6 +21,10 @@ Share a link or text from any app to the Home Assistant companion app; MealPrep 
 
 The app polls the list every 60 s, creates a draft for every link (max 10 per entry) or for text of at least 20 characters, and removes the entry. Drafts show up under "Import" with an "Inbox" badge; the number of drafts to review is shown on the navigation tab. Entries with neither a link nor enough text stay in the list.
 
+## Show the plan in Home Assistant
+
+The app posts `sensor.essensplan` every 5 minutes and right after every plan change. Its state is the next meal (today's lunch until 14:00, then today's dinner until 21:00, then tomorrow's first meal, `–` if nothing is planned); the attributes `today_lunch`, `today_dinner`, `tomorrow_lunch`, `tomorrow_dinner` and `week` can be used on a dashboard or in Assist. After an HA restart the sensor is gone until the next post (at most 5 minutes).
+
 ## Development quickstart
 
 Requires Python 3.13 (standard library only, no pip packages).

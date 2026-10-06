@@ -808,7 +808,7 @@ Follow the results V3–V5 in §5; if they contradict this description, ask befo
 - [ ] The start page shows today's meals and yesterday's unrated meal; rating it removes it from the list (manual, phone).
 - [ ] An HA dashboard entity card shows `sensor.essensplan`; it switches at 14:00 and 21:00 (manual, HA).
 - [ ] After an HA restart, the sensor is back within 5 min (manual, HA).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ## 10. Testing
 

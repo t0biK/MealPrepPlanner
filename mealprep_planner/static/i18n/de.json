@@ -201,5 +201,15 @@
   "shopping.status.pushed": "Gesendet",
   "settings.pantry": "Vorrat",
   "settings.pantry_hint": "Ein Name pro Zeile. Diese Zutaten werden nie an Bring! gesendet.",
-  "error.bring_failed": "Bring! ist nicht erreichbar oder es ist keine Liste gewählt."
+  "error.bring_failed": "Bring! ist nicht erreichbar oder es ist keine Liste gewählt.",
+  "today.title": "Heute",
+  "today.today": "Heute",
+  "today.tomorrow": "Morgen",
+  "today.nothing": "Nichts geplant.",
+  "today.portions": "{n} Portionen",
+  "today.rate": "Wie war's?",
+  "today.rate_hint": "Bewerte, was zuletzt auf dem Tisch stand.",
+  "today.rate_empty": "Alles bewertet.",
+  "today.add_link": "Link hinzufügen",
+  "today.link_added": "Link wird importiert."
 }

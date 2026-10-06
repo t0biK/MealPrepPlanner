@@ -493,6 +493,7 @@ def api_get_plan(h, m):
 def api_generate_plan(h, m):
     week = _week(m)
     plans.generate(h.conn, week, db.get_settings(h.conn), random.Random())
+    worker.notify_plan_changed()
     h.send_json(200, _plan_json(h, week))
 
 
@@ -508,6 +509,7 @@ def api_plan_slot(h, m):
                           datetime.now().date())
     except plans.Refused:
         raise ApiError(400, "bad_request")
+    worker.notify_plan_changed()
     h.send_json(200, _plan_json(h, week))
 
 
@@ -515,6 +517,7 @@ def api_confirm_plan(h, m):
     """Confirm, then push to Bring!; the plan stays confirmed when the push fails (`push.error`)."""
     week = _week(m)
     plans.confirm(h.conn, week, db.get_settings(h.conn))
+    worker.notify_plan_changed()
     try:
         push = shopping.push(h.conn, week)
     except shopping.BringFailed:
@@ -547,7 +550,14 @@ def api_put_pantry(h, m):
     h.send_json(200, {"names": shopping.set_pantry(h.conn, _body_dict(h).get("names"))})
 
 
+# ---- today page (M9) ----
+
+def api_today(h, m):
+    h.send_json(200, plans.today_view(h.conn, h.user["id"], datetime.now().date()))
+
+
 ROUTES = [
+    ("GET", re.compile(r"^/api/today$"), api_today),
     ("GET", re.compile(r"^/api/plans/([^/]+)$"), api_get_plan),
     ("POST", re.compile(r"^/api/plans/([^/]+)/generate$"), api_generate_plan),
     ("POST", re.compile(r"^/api/plans/([^/]+)/slots/(\d+)/([a-z]+)$"), api_plan_slot),

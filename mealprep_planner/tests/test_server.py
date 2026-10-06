@@ -3,10 +3,11 @@ import json
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from mealprep import VERSION, db, ha, server
+from mealprep import VERSION, db, ha, server, worker
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
@@ -245,6 +246,24 @@ class DevServerTest(unittest.TestCase):
         self.assertTrue(self.plan_slot(plan, 0, "lunch")["skipped"])
         self.assertEqual(plan["totals"][0]["kcal"], 0)
         self.assertFalse(self.plan_slot(post("slots/0/lunch", {"action": "unskip"})[1], 0, "lunch")["skipped"])
+
+    def test_today_api(self):
+        status, body = self.call("GET", "/api/today")
+        self.assertEqual((status, sorted(body)), (200, ["rate", "today", "tomorrow"]))
+        self.assertEqual(sorted(body["today"]), ["date", "dinner", "lunch"])
+        self.assertEqual(body["today"]["date"], datetime.now().date().isoformat())
+        self.assertIsInstance(body["rate"], list)
+
+    def test_plan_changes_signal_the_worker(self):
+        week = "2030-W20"
+        with mock.patch.object(worker, "notify_plan_changed") as notify:
+            self.call("POST", f"/api/plans/{week}/generate")
+            self.call("POST", f"/api/plans/{week}/slots/0/lunch", {"action": "lock"})
+            self.call("POST", f"/api/plans/{week}/confirm")
+            self.assertEqual(notify.call_count, 3)
+            self.call("POST", f"/api/plans/{week}/slots/0/lunch", {"action": "fly"})  # rejected: no change
+            self.call("POST", "/api/plans/2030-W54/generate")
+            self.assertEqual(notify.call_count, 3)
 
     def test_pantry_api(self):
         status, body = self.call("GET", "/api/pantry")
