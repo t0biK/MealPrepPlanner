@@ -398,3 +398,13 @@ def rating_info(conn, recipe_id, user_id):
         "household_score": score,
         "vetoed": planner.is_vetoed(model, recipe_id),
     }
+
+
+# ---- planning (M7) ----
+
+def planning_recipes(conn):
+    """What the planner needs of every recipe: id, meal suitability, archived flag, tags."""
+    tags = _tag_map(conn)
+    return [{"id": r["id"], "for_lunch": bool(r["for_lunch"]), "for_dinner": bool(r["for_dinner"]),
+             "archived": bool(r["archived"]), "tags": tags.get(r["id"], [])}
+            for r in conn.execute("SELECT id, for_lunch, for_dinner, archived FROM recipes ORDER BY id")]

@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import re
 import time
 from datetime import datetime
@@ -7,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import VERSION, db, ha, ingredients, recipes, worker
+from . import VERSION, db, ha, ingredients, plans, planner, recipes, worker
 
 INGRESS_IP = "172.30.32.2"
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -470,7 +471,57 @@ def api_image(h, m):
     h.wfile.write(body)
 
 
+# ---- week planner (M7) ----
+
+def _week(m):
+    """Week id from the path: 'YYYY-Www' and an existing ISO week, else 400 invalid_field."""
+    try:
+        planner.week_dates(m.group(1))
+    except ValueError:
+        raise db.InvalidField("week")
+    return m.group(1)
+
+
+def _plan_json(h, week):
+    return plans.view(h.conn, week, db.get_settings(h.conn), datetime.now().date())
+
+
+def api_get_plan(h, m):
+    h.send_json(200, _plan_json(h, _week(m)))
+
+
+def api_generate_plan(h, m):
+    week = _week(m)
+    plans.generate(h.conn, week, db.get_settings(h.conn), random.Random())
+    h.send_json(200, _plan_json(h, week))
+
+
+def api_plan_slot(h, m):
+    week = _week(m)
+    day, meal = int(m.group(2)), m.group(3)
+    if not 0 <= day <= 6:
+        raise db.InvalidField("day")
+    if meal not in planner.MEALS:
+        raise db.InvalidField("meal")
+    try:
+        plans.slot_action(h.conn, week, day, meal, _body_dict(h), db.get_settings(h.conn), random.Random(),
+                          datetime.now().date())
+    except plans.Refused:
+        raise ApiError(400, "bad_request")
+    h.send_json(200, _plan_json(h, week))
+
+
+def api_confirm_plan(h, m):
+    week = _week(m)
+    plans.confirm(h.conn, week, db.get_settings(h.conn))
+    h.send_json(200, _plan_json(h, week))
+
+
 ROUTES = [
+    ("GET", re.compile(r"^/api/plans/([^/]+)$"), api_get_plan),
+    ("POST", re.compile(r"^/api/plans/([^/]+)/generate$"), api_generate_plan),
+    ("POST", re.compile(r"^/api/plans/([^/]+)/slots/(\d+)/([a-z]+)$"), api_plan_slot),
+    ("POST", re.compile(r"^/api/plans/([^/]+)/confirm$"), api_confirm_plan),
     ("GET", re.compile(r"^/images/([0-9a-f]{64}\.(jpg|png|webp))$"), api_image),
     ("POST", re.compile(r"^/api/imports$"), api_create_imports),
     ("GET", re.compile(r"^/api/imports$"), api_list_imports),

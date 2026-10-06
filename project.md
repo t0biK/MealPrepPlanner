@@ -770,7 +770,7 @@ Goal: prove deployment, identity and every HA API the app depends on, before bui
 - [ ] Reroll, lock, replace, portions and switching off work on the phone; locked slots survive a new "Vorschlag erstellen" (manual, phone).
 - [ ] Every suggestion shows its reason; day totals show kcal, with "≈" when estimates are involved (manual).
 - [ ] "Bestätigen" marks the plan as confirmed; past slots can be marked "ausgefallen" (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M8 – Shopping list and Bring! push
 

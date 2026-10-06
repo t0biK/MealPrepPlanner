@@ -151,6 +151,99 @@ class DevServerTest(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/recipes?sort=best")[1]["field"], "sort")
         self.assertEqual(self.call("GET", "/api/recipes?filter=x")[1]["field"], "filter")
 
+    def plan_slot(self, plan, day, meal):
+        return next(x for x in plan["slots"] if (x["day"], x["meal"]) == (day, meal))
+
+    def test_plan_week_validation_and_draft_from_slot_pattern(self):
+        for bad in ("2026-W54", "2027-W53", "2026-W00", "abc", "2026-1"):
+            self.assertEqual(self.call("GET", f"/api/plans/{bad}"), (400, {"error": "invalid_field", "field": "week"}))
+            self.assertEqual(self.call("POST", f"/api/plans/{bad}/generate")[1]["field"], "week")
+            self.assertEqual(self.call("POST", f"/api/plans/{bad}/confirm")[1]["field"], "week")
+        pattern = [i not in (0, 13) for i in range(14)]  # Monday lunch and Sunday dinner off
+        self.call("PUT", "/api/settings", {"slot_pattern": pattern, "default_portions": 3})
+        try:
+            status, plan = self.call("GET", "/api/plans/2031-W01")
+        finally:
+            self.call("PUT", "/api/settings", {"slot_pattern": [True] * 14, "default_portions": 2})
+        self.assertEqual((status, plan["status"], plan["confirmed_at"], len(plan["slots"])), (200, "draft", None, 14))
+        self.assertEqual(plan["dates"][0], "2030-12-30")
+        self.assertEqual([s["active"] for s in plan["slots"]], pattern)
+        self.assertEqual({s["portions"] for s in plan["slots"]}, {3})
+        self.assertEqual(len(plan["totals"]), 7)
+        self.assertEqual(self.call("GET", "/api/plans/2031-W01")[1]["slots"], plan["slots"])  # stored, not recreated
+
+    def test_plan_generate_actions_and_confirm(self):
+        week = "2030-W10"
+        mk = lambda title, **extra: self.call("POST", "/api/recipes", {"format_version": 1, "title": title, "servings": 2, **extra})[1]["id"]
+        ids = [mk(f"Plan {i}") for i in range(16)]
+        nutri = mk("Plan Nutri", nutrition={"kcal": 600, "protein_g": 30, "fat_g": 20, "carbs_g": 70, "source": "ai"})
+        never = mk("Plan Never")
+        self.call("PUT", f"/api/recipes/{never}/rating", {"stars": 0})
+        post = lambda path, body=None: self.call("POST", f"/api/plans/{week}/{path}", body)
+
+        status, plan = post("generate")
+        self.assertEqual(status, 200)
+        picked = [s["recipe"]["id"] for s in plan["slots"]]
+        self.assertEqual(len(set(picked)), 14)
+        self.assertNotIn(never, picked)  # vetoed recipes are never suggested
+        self.assertTrue(all(s["reason"]["kind"] in ("rated", "predicted", "new") for s in plan["slots"]))
+
+        # lock survives a new suggestion
+        locked = plan["slots"][0]["recipe"]["id"]
+        self.assertTrue(post("slots/0/lunch", {"action": "lock"})[1]["slots"][0]["locked"])
+        again = post("generate")[1]
+        self.assertEqual((again["slots"][0]["recipe"]["id"], again["slots"][0]["locked"]), (locked, True))
+
+        # reroll gives another recipe; inactive slots cannot be rerolled; locked slot recipe not reused elsewhere
+        before = self.plan_slot(again, 1, "dinner")["recipe"]["id"]
+        rerolled = post("slots/1/dinner", {"action": "reroll"})[1]
+        self.assertNotEqual(self.plan_slot(rerolled, 1, "dinner")["recipe"]["id"], before)
+        self.assertEqual(len({s["recipe"]["id"] for s in rerolled["slots"]}), 14)
+        off = post("slots/2/lunch", {"action": "deactivate"})[1]
+        self.assertFalse(self.plan_slot(off, 2, "lunch")["active"])
+        self.assertEqual(post("slots/2/lunch", {"action": "reroll"}), (400, {"error": "bad_request"}))
+        self.assertTrue(self.plan_slot(post("slots/2/lunch", {"action": "activate"})[1], 2, "lunch")["active"])
+
+        # portions, set (also vetoed), clear, validation
+        self.assertEqual(self.plan_slot(post("slots/3/lunch", {"action": "portions", "portions": 5})[1], 3, "lunch")["portions"], 5)
+        for bad in (0, 13, "2", True, None):
+            self.assertEqual(post("slots/3/lunch", {"action": "portions", "portions": bad})[1]["field"], "portions")
+        slot = self.plan_slot(post("slots/3/lunch", {"action": "set", "recipe_id": never})[1], 3, "lunch")
+        self.assertEqual((slot["recipe"]["id"], slot["reason"]), (never, {"kind": "manual"}))
+        slot = self.plan_slot(post("slots/4/dinner", {"action": "set", "recipe_id": nutri})[1], 4, "dinner")
+        self.assertEqual(slot["recipe"]["title"], "Plan Nutri")
+        totals = self.call("GET", f"/api/plans/{week}")[1]["totals"]
+        self.assertEqual((totals[4]["kcal"], totals[4]["estimated"], totals[4]["incomplete"]), (600, True, True))  # lunch has no nutrition
+        self.call("POST", f"/api/recipes/{ids[0]}/archive")
+        for bad in (ids[0], 999999, "x", None, True):
+            self.assertEqual(post("slots/0/dinner", {"action": "set", "recipe_id": bad})[1]["field"], "recipe_id")
+        cleared = self.plan_slot(post("slots/3/lunch", {"action": "clear"})[1], 3, "lunch")
+        self.assertEqual((cleared["recipe"], cleared["reason"], cleared["locked"]), (None, None, False))
+        self.assertEqual(post("slots/0/lunch", {"action": "fly"})[1]["field"], "action")
+        self.assertEqual(post("slots/0/lunch", {})[1]["field"], "action")
+        self.assertEqual(post("slots/7/lunch", {"action": "lock"})[1]["field"], "day")
+        self.assertEqual(post("slots/0/brunch", {"action": "lock"})[1]["field"], "meal")
+
+        # skip needs a confirmed plan and a date <= today
+        self.assertEqual(post("slots/0/lunch", {"action": "skip"})[0], 400)
+        status, plan = post("confirm")
+        self.assertEqual((status, plan["status"]), (200, "confirmed"))
+        self.assertTrue(plan["confirmed_at"])
+        self.assertEqual(post("slots/0/lunch", {"action": "skip"})[0], 400)  # future week
+        self.assertEqual(post("slots/5/lunch", {"action": "set", "recipe_id": nutri})[0], 200)  # editing stays allowed
+
+    def test_plan_skip_in_the_past(self):
+        week = "2020-W10"
+        rid = self.call("POST", "/api/recipes", {"format_version": 1, "title": "Past meal", "servings": 2})[1]["id"]
+        post = lambda path, body=None: self.call("POST", f"/api/plans/{week}/{path}", body)
+        post("slots/0/lunch", {"action": "set", "recipe_id": rid})
+        self.assertEqual(post("slots/0/lunch", {"action": "skip"})[0], 400)  # still a draft
+        self.assertEqual(post("confirm")[1]["status"], "confirmed")
+        plan = post("slots/0/lunch", {"action": "skip"})[1]
+        self.assertTrue(self.plan_slot(plan, 0, "lunch")["skipped"])
+        self.assertEqual(plan["totals"][0]["kcal"], 0)
+        self.assertFalse(self.plan_slot(post("slots/0/lunch", {"action": "unskip"})[1], 0, "lunch")["skipped"])
+
     def test_tag_crud(self):
         status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})
         self.assertEqual(status, 201)

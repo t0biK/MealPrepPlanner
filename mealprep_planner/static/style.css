@@ -527,3 +527,104 @@ img.thumb {
 .stars button[aria-pressed="true"] {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
+
+/* week planner (M7) */
+.week-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.slot {
+  padding: 0.5rem 0 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.slot:last-of-type {
+  border-bottom: 0;
+}
+
+.slot.off,
+.slot.skipped {
+  opacity: 0.6;
+}
+
+.slot.skipped > a {
+  text-decoration: line-through;
+}
+
+.slot img.thumb {
+  max-height: 7rem;
+  margin: 0.5rem 0;
+}
+
+.slot .actions {
+  margin: 0.25rem 0 0;
+}
+
+.slot .row > .stepper button,
+button.icon {
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  padding: 0.2rem 0.5rem;
+}
+
+.slot p {
+  margin: 0.25rem 0 0;
+}
+
+dialog.picker {
+  width: min(92vw, 640px);
+  max-height: 85vh;
+  padding: 1rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+dialog.picker::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+dialog.picker input[type="search"] {
+  margin-bottom: 0.75rem;
+}
+
+button.pick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  margin-bottom: 0.5rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.pattern {
+  display: grid;
+  grid-template-columns: auto repeat(7, 1fr);
+  gap: 0.5rem 0.25rem;
+  align-items: center;
+  justify-items: center;
+}
+
+.pattern > span:first-child,
+.pattern > span:nth-child(8n + 1) {
+  justify-self: start;
+  padding-right: 0.5rem;
+}
+
+.pattern input[type="checkbox"] {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 6px;
+}
+
+.pattern input[type="checkbox"]::after {
+  display: none;
+}

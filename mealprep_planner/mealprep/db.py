@@ -92,9 +92,30 @@ MIGRATIONS = [
       PRIMARY KEY (user_id, recipe_id)
     );
     """,
+    """
+    CREATE TABLE plans (
+      week         TEXT PRIMARY KEY,
+      status       TEXT NOT NULL CHECK (status IN ('draft','confirmed')),
+      confirmed_at TEXT
+    );
+    CREATE TABLE plan_slots (
+      week      TEXT NOT NULL REFERENCES plans(week),
+      day       INTEGER NOT NULL CHECK (day BETWEEN 0 AND 6),
+      meal      TEXT NOT NULL CHECK (meal IN ('lunch','dinner')),
+      active    INTEGER NOT NULL,
+      recipe_id INTEGER REFERENCES recipes(id),
+      portions  INTEGER NOT NULL CHECK (portions BETWEEN 1 AND 12),
+      locked    INTEGER NOT NULL DEFAULT 0,
+      skipped   INTEGER NOT NULL DEFAULT 0,
+      reason    TEXT,
+      PRIMARY KEY (week, day, meal)
+    );
+    """,
 ]
 
-DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None}
+DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None,
+            "slot_pattern": [True] * 14, "repeat_window_days": 14, "new_per_week": 2}
+INT_RANGES = {"default_portions": (1, 12), "repeat_window_days": (0, 60), "new_per_week": (0, 14)}
 ENTITY_DOMAIN = {"bring_entity": "todo", "ai_entity": "ai_task", "inbox_entity": "todo"}
 
 
@@ -125,7 +146,7 @@ def migrate(conn):
 
 
 def get_settings(conn):
-    settings = dict(DEFAULTS)
+    settings = {k: list(v) if isinstance(v, list) else v for k, v in DEFAULTS.items()}
     for row in conn.execute("SELECT key, value FROM settings"):
         if row["key"] in settings:
             settings[row["key"]] = json.loads(row["value"])
@@ -136,8 +157,11 @@ def _validate(key, value):
     if key == "ai_enabled":
         if not isinstance(value, bool):
             raise InvalidField(key)
-    elif key == "default_portions":
-        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 12:
+    elif key in INT_RANGES:
+        if not isinstance(value, int) or isinstance(value, bool) or not INT_RANGES[key][0] <= value <= INT_RANGES[key][1]:
+            raise InvalidField(key)
+    elif key == "slot_pattern":
+        if not isinstance(value, list) or len(value) != 14 or not all(isinstance(v, bool) for v in value):
             raise InvalidField(key)
     elif key in ENTITY_DOMAIN:
         if value is None:

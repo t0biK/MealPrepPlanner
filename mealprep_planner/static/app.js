@@ -74,6 +74,7 @@ function renderChrome(route, reviewCount = 0) {
     el("a", { href, ...(active ? { ariaCurrent: "page" } : {}) }, el("span", { textContent: icon }), label,
       ...(count ? [el("b", { className: "count", textContent: count, ariaLabel: t("nav.review_count", { count }) })] : []));
   document.getElementById("nav").replaceChildren(
+    tab("#/woche", "📅", t("nav.week"), route === "woche"),
     tab("#/rezepte", "🍲", t("nav.recipes"), route === "rezepte"),
     tab("#/import", "📥", t("nav.import"), route === "import", reviewCount),
     tab("#/einstellungen", "⚙️", t("nav.settings"), route === "einstellungen" || route === "systemcheck"),
@@ -116,15 +117,37 @@ async function pageSettings(app) {
   const aiEnabled = el("input", { type: "checkbox", checked: settings.ai_enabled });
   aiEnabled.onchange = () => save({ ai_enabled: aiEnabled.checked });
 
-  const portions = el("input", { type: "number", min: 1, max: 12, step: 1, value: settings.default_portions,
-    ariaLabel: t("settings.default_portions") });
-  portions.onchange = () => save({ default_portions: Number(portions.value) });
+  const numberSetting = (key, min, max) => {
+    const input = el("input", { type: "number", min, max, step: 1, value: settings[key], ariaLabel: t(`settings.${key}`) });
+    input.onchange = () => save({ [key]: Number(input.value) });
+    return input;
+  };
+
+  // 7 x 2 grid: which meals a new week plans by default (index = day * 2 + 0 lunch / 1 dinner)
+  const pattern = [...settings.slot_pattern];
+  const dayName = (day, weekday) => new Date(2024, 0, 1 + day).toLocaleDateString(document.documentElement.lang, { weekday });
+  const patternGrid = el("div", { className: "pattern" }, el("span"),
+    ...[0, 1, 2, 3, 4, 5, 6].map((day) => el("span", { textContent: dayName(day, "short") })),
+    ...["form.lunch", "form.dinner"].flatMap((meal, m) => [
+      el("span", { textContent: t(meal) }),
+      ...[0, 1, 2, 3, 4, 5, 6].map((day) => {
+        const box = el("input", { type: "checkbox", checked: pattern[day * 2 + m],
+          ariaLabel: t("plan.slot_label", { day: dayName(day, "long"), meal: t(meal) }) });
+        box.onchange = () => {
+          pattern[day * 2 + m] = box.checked;
+          save({ slot_pattern: pattern });
+        };
+        return box;
+      })]));
 
   const health = await api("GET", "api/health");
   app.replaceChildren(
     el("h1", { textContent: t("settings.title") }),
     card(t("settings.language"), lang),
-    card(t("settings.default_portions"), portions),
+    card(t("settings.default_portions"), numberSetting("default_portions", 1, 12)),
+    card(t("settings.slot_pattern"), patternGrid, el("p", { className: "muted", textContent: t("settings.slot_pattern_hint") })),
+    card(t("settings.repeat_window_days"), numberSetting("repeat_window_days", 0, 60)),
+    card(t("settings.new_per_week"), numberSetting("new_per_week", 0, 14)),
     await tagEditor(),
     card(t("settings.bring"), await entityPicker("todo", "bring_entity")),
     card(t("settings.inbox"), await entityPicker("todo", "inbox_entity")),
@@ -525,6 +548,153 @@ async function pageRecipeForm(app, id, job = null) {
     ...(job ? [jobActions(job, "#/import")] : []));
 }
 
+// ---- week planner (M7) ----
+
+const DAY_MS = 86400000;
+
+// ISO week id ("2026-W41") of a local date: the year and week number of its Thursday
+function weekOf(d) {
+  const thursday = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  thursday.setUTCDate(thursday.getUTCDate() + 3 - ((thursday.getUTCDay() + 6) % 7));
+  const n = Math.floor((thursday - Date.UTC(thursday.getUTCFullYear(), 0, 1)) / DAY_MS / 7) + 1;
+  return `${thursday.getUTCFullYear()}-W${String(n).padStart(2, "0")}`;
+}
+
+// the week id n weeks later (n may be negative)
+function shiftWeek(week, n) {
+  const [year, number] = week.split("-W").map(Number);
+  const jan4 = new Date(year, 0, 4);
+  return weekOf(new Date(year, 0, 4 - ((jan4.getDay() + 6) % 7) + (number - 1 + n) * 7));
+}
+
+const parseDate = (iso) => new Date(...iso.split("-").map((v, i) => (i === 1 ? v - 1 : +v)));
+
+function reasonText(r) {
+  if (!r) return "";
+  const text = t(`plan.reason.${r.kind}`, { score: r.score == null ? "" : fmtScore(r.score) });
+  return r.tags?.length ? `${text} · ${r.tags.join(", ")}` : text;
+}
+
+function totalsText(total) {
+  if (!total.kcal && !total.incomplete) return "";
+  const approx = total.estimated ? "≈ " : "";
+  const parts = [`${approx}${Math.round(total.kcal)} kcal`,
+    ...[["recipe.protein", total.protein_g], ["recipe.fat", total.fat_g], ["recipe.carbs", total.carbs_g]]
+      .map(([k, v]) => `${t(k)} ${approx}${Math.round(v)} g`)];
+  if (total.incomplete) parts.push(t("plan.incomplete"));
+  return `${t("plan.totals")}: ${parts.join(" · ")}`;
+}
+
+// search dialog: pick any recipe for a slot
+function pickRecipe(onPick) {
+  const dialog = el("dialog", { className: "picker" });
+  const list = el("div");
+  const search = el("input", { type: "search", placeholder: t("recipes.search"), ariaLabel: t("recipes.search") });
+  const load = async () => {
+    try {
+      const items = await api("GET", "api/recipes?" + new URLSearchParams({ q: search.value, sort: "score" }));
+      list.replaceChildren(...(items.length ? items.map((r) => {
+        const b = el("button", { type: "button", className: "pick-card" },
+          el("strong", { textContent: r.title }), el("span", { className: "muted", textContent: mealInfo(r) }), ratingLine(r));
+        b.onclick = () => {
+          dialog.close();
+          onPick(r.id);
+        };
+        return b;
+      }) : [el("p", { className: "muted", textContent: t("recipes.empty") })]));
+    } catch (e) {
+      toast(errorText(e));
+    }
+  };
+  let timer;
+  search.oninput = () => {
+    clearTimeout(timer);
+    timer = setTimeout(load, 250);
+  };
+  const close = el("button", { type: "button", className: "secondary", textContent: t("form.cancel") });
+  close.onclick = () => dialog.close();
+  dialog.onclose = () => dialog.remove();
+  dialog.append(el("h2", { textContent: t("plan.replace_title") }), search, list, close);
+  document.body.append(dialog);
+  dialog.showModal();
+  load();
+}
+
+async function pageWeek(app, week) {
+  let plan = await api("GET", "api/plans/" + week);
+  const root = el("div");
+  const act = async (path, body) => {
+    try {
+      plan = await api("POST", `api/plans/${week}/${path}`, body ?? {});
+      show();
+      return true;
+    } catch (e) {
+      toast(errorText(e));
+      return false;
+    }
+  };
+  const slotAct = (s, body) => act(`slots/${s.day}/${s.meal}`, body);
+  const icon = (text, label, onclick) => {
+    const b = el("button", { type: "button", className: "secondary icon", textContent: text, ariaLabel: label, title: label });
+    b.onclick = onclick;
+    return b;
+  };
+
+  const slotView = (s) => {
+    const meal = el("strong", { textContent: t(s.meal === "lunch" ? "form.lunch" : "form.dinner") });
+    if (!s.active) {
+      return el("div", { className: "slot off" }, el("div", { className: "row" }, meal,
+        el("span", { className: "muted", textContent: t("plan.off") }),
+        icon("▶", t("plan.activate"), () => slotAct(s, { action: "activate" }))));
+    }
+    const minus = icon("−", t("plan.portions_less"), () => slotAct(s, { action: "portions", portions: s.portions - 1 }));
+    const plus = icon("+", t("plan.portions_more"), () => slotAct(s, { action: "portions", portions: s.portions + 1 }));
+    minus.disabled = s.portions <= 1;
+    plus.disabled = s.portions >= 12;
+    const skip = el("input", { type: "checkbox", checked: s.skipped });
+    skip.onchange = () => slotAct(s, { action: skip.checked ? "skip" : "unskip" });
+    return el("div", { className: "slot" + (s.skipped ? " skipped" : "") },
+      el("div", { className: "row" }, meal,
+        el("div", { className: "stepper", role: "group", ariaLabel: t("plan.portions") }, minus, el("strong", { textContent: s.portions }), plus)),
+      ...(s.recipe ? [...image(s.recipe.image), el("a", { href: "#/rezepte/" + s.recipe.id, textContent: s.recipe.title })]
+        : [el("span", { className: "muted", textContent: t("plan.empty_slot") })]),
+      el("p", { className: "muted", textContent: reasonText(s.reason) }),
+      el("div", { className: "actions" },
+        ...(s.locked ? [] : [icon("🎲", t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
+        icon("✏️", t("plan.replace"), () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id }))),
+        ...(s.recipe ? [icon(s.locked ? "🔓" : "🔒", t(s.locked ? "plan.unlock" : "plan.lock"),
+          () => slotAct(s, { action: s.locked ? "unlock" : "lock" }))] : []),
+        icon("⏸", t("plan.deactivate"), () => slotAct(s, { action: "deactivate" }))),
+      ...(plan.status === "confirmed" && s.date <= plan.today ? [el("label", { className: "row" }, t("plan.skipped"), skip)] : []));
+  };
+
+  const show = () => {
+    const lang = document.documentElement.lang;
+    const range = (iso) => parseDate(iso).toLocaleDateString(lang, { day: "numeric", month: "numeric" });
+    const generate = el("button", { type: "button", textContent: t("plan.generate") });
+    generate.onclick = () => act("generate");
+    const confirmBtn = el("button", { type: "button", className: plan.status === "confirmed" ? "secondary" : "", textContent: t("plan.confirm") });
+    confirmBtn.onclick = async () => {
+      if (await act("confirm")) toast(t("plan.confirmed"));
+    };
+    root.replaceChildren(
+      el("div", { className: "week-nav" },
+        el("a", { className: "btn secondary", href: "#/woche/" + shiftWeek(week, -1), textContent: "‹", ariaLabel: t("plan.prev") }),
+        el("strong", { textContent: `${t("plan.week_label", { week })} · ${range(plan.dates[0])} – ${range(plan.dates[6])}` }),
+        el("a", { className: "btn secondary", href: "#/woche/" + shiftWeek(week, 1), textContent: "›", ariaLabel: t("plan.next") })),
+      el("div", { className: "row" },
+        el("span", { className: "badge " + (plan.status === "confirmed" ? "ok" : ""), textContent: t(`plan.status.${plan.status}`) }),
+        el("a", { href: "#/woche/" + shiftWeek(weekOf(new Date()), 1), textContent: t("plan.next_week") })),
+      el("div", { className: "actions" }, generate, confirmBtn),
+      ...plan.dates.map((iso, day) => card(
+        parseDate(iso).toLocaleDateString(lang, { weekday: "long", day: "numeric", month: "numeric" }),
+        ...plan.slots.filter((s) => s.day === day).map(slotView),
+        ...(totalsText(plan.totals[day]) ? [el("p", { className: "muted", textContent: totalsText(plan.totals[day]) })] : []))));
+  };
+  app.replaceChildren(el("h1", { textContent: t("plan.title") }), root);
+  show();
+}
+
 // ---- import (M3) ----
 
 function jobActions(job, after) {
@@ -672,6 +842,10 @@ async function tagEditor() {
 // hash route -> [nav tab, page function]
 function routePage(parts) {
   const [a, b, c] = parts;
+  if (a === "woche") {
+    if (!b) return ["woche", async () => location.replace("#/woche/" + weekOf(new Date()))];
+    if (/^\d{4}-W\d{2}$/.test(b) && !c) return ["woche", (app) => pageWeek(app, b)];
+  }
   if (a === "rezepte") {
     if (!b) return ["rezepte", pageRecipes];
     if (b === "neu" && !c) return ["rezepte", (app) => pageRecipeForm(app, null)];
