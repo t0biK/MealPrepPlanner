@@ -205,7 +205,24 @@ function pageSystemcheck(app) {
       ...(name === "bring" ? [el("p", { className: "muted", textContent: t("check.bring.note") })] : []),
       result);
   });
-  app.replaceChildren(el("h1", { textContent: t("systemcheck.title") }), ...cards);
+  // Bring! links (V8/V9): open them on the phone; nothing is sent
+  const linkUrl = el("input", { type: "url", placeholder: t("import.link"), ariaLabel: t("check.bring_links"), maxLength: 2048 });
+  const linkResult = el("div");
+  const linkButton = el("button", { type: "button", textContent: "▶", ariaLabel: t("check.bring_links") });
+  linkButton.onclick = async () => {
+    try {
+      const r = await api("POST", "api/system/check", { check: "bring_links", url: linkUrl.value.trim() });
+      linkResult.replaceChildren(el("ul", { className: "plain" }, ...r.details.links.filter((l) => /^https?:\/\//.test(l.url)).map((l) =>
+        el("li", {}, el("strong", { textContent: t(`check.bring_links.${l.name}`) }), el("br"),
+          el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer", textContent: l.url })))));
+    } catch (e) {
+      linkResult.replaceChildren(el("span", { className: "badge fail", textContent: errorText(e) }));
+    }
+  };
+  const linkCard = card(null, el("strong", { textContent: t("check.bring_links") }),
+    el("p", { className: "muted", textContent: t("check.bring_links.note") }),
+    el("div", { className: "row" }, linkUrl, linkButton), linkResult);
+  app.replaceChildren(el("h1", { textContent: t("systemcheck.title") }), ...cards, linkCard);
 }
 
 // ---- recipes (M2) ----
@@ -405,6 +422,8 @@ async function pageRecipe(app, id, query = "") {
       el("p", { textContent: nutrition.map(([v, k, u]) => `${v}${u} ${t(k)}`).join(" · ") }),
       ...(r.nutrition.source === "ai" ? [el("span", { className: "badge", textContent: t("recipe.estimated") })] : []))] : []),
     ...(link ? [el("p", {}, t("recipe.source") + ": ", link)] : []),
+    ...(r.bring_import_url?.startsWith("https://") ? [el("p", {}, el("a", {
+      href: r.bring_import_url, target: "_blank", rel: "noopener noreferrer", textContent: t("recipe.bring_import") }))] : []),
     el("div", { className: "actions" },
       el("a", { className: "btn", href: `#/rezepte/${id}/bearbeiten`, textContent: t("recipe.edit") }), archiveBtn),
   );
@@ -504,19 +523,54 @@ async function pageRecipeForm(app, id, job = null) {
   };
 
   const numOrNull = (box) => (box.value.trim() === "" ? null : Number(box.value));
-  const save = async (ev) => {
-    ev.preventDefault();
-    if (!lunch.checked && !dinner.checked) return toast(t("form.need_meal"));
-    const ingredients = [];
+  // the ingredient rows as a list; null (after a toast) when an amount is not a number
+  const readIngredients = () => {
+    const list = [];
     for (const row of ingRows) {
       if (!row.name.value.trim() && !row.amount.value.trim() && !row.note.value.trim()) continue;
       const raw = row.amount.value.trim().replace(",", ".");
       const amount = raw === "" ? null : Number(raw);
-      if (Number.isNaN(amount)) return toast(t("form.bad_amount", { value: row.amount.value }));
-      ingredients.push({ amount, unit: row.unit.value || null, name: row.name.value, note: row.note.value || null });
+      if (Number.isNaN(amount)) return toast(t("form.bad_amount", { value: row.amount.value })) ?? null;
+      list.push({ amount, unit: row.unit.value || null, name: row.name.value, note: row.note.value || null });
     }
-    const values = Object.fromEntries(Object.entries(nutri).map(([k, box]) => [k, numOrNull(box)]));
-    const unchanged = n.source && Object.keys(values).every((k) => values[k] === (n[k] ?? null));
+    return list;
+  };
+
+  // nutrition source: `base` holds the values it applies to; edited values count as "manual"
+  let base = n;
+  let baseSource = n.source ?? null;
+  const readNutrition = () => Object.fromEntries(Object.entries(nutri).map(([k, box]) => [k, numOrNull(box)]));
+  const unchanged = (values) => baseSource && Object.keys(values).every((k) => values[k] === (base[k] ?? null));
+  const estimatedBadge = el("p", { hidden: baseSource !== "ai" }, el("span", { className: "badge", textContent: t("recipe.estimated") }));
+  Object.values(nutri).forEach((box) => box.addEventListener("input", () => {
+    estimatedBadge.hidden = !(baseSource === "ai" && unchanged(readNutrition()));
+  }));
+  const estimate = el("button", { type: "button", className: "secondary", textContent: t("form.estimate") });
+  estimate.onclick = async () => {
+    const ingredients = readIngredients();
+    if (!ingredients) return;
+    if (!ingredients.length) return toast(t("form.estimate_need"));
+    if (baseSource === "page" && unchanged(readNutrition()) && !confirm(t("form.estimate_confirm"))) return;
+    estimate.disabled = true;
+    try {
+      const guess = (await api("POST", "api/nutrition/estimate",
+        { draft: { format_version: 1, title: title.value, servings: Number(servings.value), ingredients } })).nutrition;
+      for (const k of Object.keys(nutri)) nutri[k].value = guess[k] ?? "";
+      base = guess;
+      baseSource = "ai";
+      estimatedBadge.hidden = false;
+    } catch (e) {
+      toast(errorText(e));
+    }
+    estimate.disabled = false;
+  };
+
+  const save = async (ev) => {
+    ev.preventDefault();
+    if (!lunch.checked && !dinner.checked) return toast(t("form.need_meal"));
+    const ingredients = readIngredients();
+    if (!ingredients) return;
+    const values = readNutrition();
     const payload = {
       format_version: 1,
       title: title.value,
@@ -530,7 +584,7 @@ async function pageRecipeForm(app, id, job = null) {
       tags: tagBoxes.filter((x) => x.box.checked).map((x) => x.name),
       ingredients,
       steps: stepRows.map((a) => a.value).filter((v) => v.trim()),
-      nutrition: Object.values(values).every((v) => v === null) ? null : { ...values, source: unchanged ? n.source : "manual" },
+      nutrition: Object.values(values).every((v) => v === null) ? null : { ...values, source: unchanged(values) ? baseSource : "manual" },
     };
     try {
       const saved = job ? await api("POST", `api/imports/${job.id}/save`, payload)
@@ -549,11 +603,11 @@ async function pageRecipeForm(app, id, job = null) {
     card(t("form.ingredients"), dataList, ingBox, el("div", { className: "actions" }, addIngBtn),
       el("details", {}, el("summary", { textContent: t("form.paste") }), paste, pasteBtn)),
     card(t("form.steps"), stepBox, el("div", { className: "actions" }, addStepBtn)),
-    card(t("form.nutrition"),
-      ...(n.source === "ai" ? [el("p", {}, el("span", { className: "badge", textContent: t("recipe.estimated") }))] : []),
+    card(t("form.nutrition"), estimatedBadge,
       el("div", { className: "two" },
         label(t("recipe.kcal"), nutri.kcal), label(t("recipe.protein") + " (g)", nutri.protein_g),
-        label(t("recipe.fat") + " (g)", nutri.fat_g), label(t("recipe.carbs") + " (g)", nutri.carbs_g))),
+        label(t("recipe.fat") + " (g)", nutri.fat_g), label(t("recipe.carbs") + " (g)", nutri.carbs_g)),
+      el("div", { className: "actions" }, estimate)),
     card(null, label(t("form.source_url"), sourceUrl)),
     el("div", { className: "actions" },
       el("button", { type: "submit", textContent: t("form.save") }),
@@ -639,43 +693,88 @@ function pickRecipe(onPick) {
   load();
 }
 
-// "name: note" line of a shopping/push entry (pantry entries are plain names)
-const entryText = (e) => (typeof e === "string" ? e : e.note ? `${e.name}: ${e.note}` : e.name);
+// "name: note" line of a push entry
+const entryText = (e) => (e.note ? `${e.name}: ${e.note}` : e.name);
 
-function pushPanel(r) {
-  if (r.error) return card(t("push.title"), el("p", { textContent: t(`error.${r.error}`) }));
+function pushPanel(r, ...extra) {
   const sections = [["push.added", r.added], ["push.updated", r.updated], ["push.failed", r.failed],
-    ["push.no_longer_needed", r.no_longer_needed], ["push.pantry", r.skipped_pantry]].filter(([, list]) => list.length);
-  const nothing = !(r.added.length || r.updated.length || r.failed.length || r.no_longer_needed.length);
+    ["push.no_longer_needed", r.no_longer_needed]].filter(([, list]) => list.length);
   return card(t("push.title"),
-    ...(nothing ? [el("p", { textContent: t("push.nothing") })] : []),
+    ...(sections.length ? [] : [el("p", { textContent: t("push.nothing") })]),
     ...sections.flatMap(([key, list]) => [el("strong", { textContent: `${t(key)} (${list.length})` }),
-      el("ul", { className: "plain" }, ...list.map((e) => el("li", { textContent: entryText(e) })))]));
+      el("ul", { className: "plain" }, ...list.map((e) => el("li", { textContent: entryText(e) })))]),
+    ...extra);
 }
 
+// checklist: tick what goes to Bring!, send it; sent items stay listed without a checkbox
 async function pageShopping(app, week) {
-  const data = await api("GET", `api/plans/${week}/shopping`);
-  app.replaceChildren(
-    el("h1", { textContent: t("shopping.title") }),
-    el("a", { href: "#/woche/" + week, textContent: t("shopping.back") }),
-    card(t("plan.week_label", { week }),
-      ...(data.items.length ? [el("ul", { className: "plain" }, ...data.items.map((i) => el("li", { className: "row" },
-        el("span", { textContent: entryText(i) }),
-        el("span", { className: "badge " + (i.status === "pushed" ? "ok" : ""), textContent: t(`shopping.status.${i.status}`) }))))]
-        : [el("p", { className: "muted", textContent: t("shopping.empty") })])),
-    ...(data.pantry.length ? [card(t("push.pantry"), el("p", { textContent: data.pantry.join(", ") }))] : []),
-    ...(data.no_longer_needed.length ? [card(t("push.no_longer_needed"),
-      el("ul", { className: "plain" }, ...data.no_longer_needed.map((e) => el("li", { textContent: entryText(e) }))))] : []));
+  const url = `api/plans/${week}/shopping`;
+  let data;
+  let result = null; // result of the last send (kept while this page is open)
+  const ticked = new Map(); // item key -> ticked
+  const adopt = (d) => {
+    data = d;
+    for (const i of d.items) {
+      if (i.status === "sent") ticked.delete(i.key);
+      else if (!ticked.has(i.key)) ticked.set(i.key, i.checked);
+    }
+  };
+  adopt(await api("GET", url));
+
+  const root = el("div");
+  const sendBtn = el("button", { type: "button" });
+  const open = () => data.items.filter((i) => i.status !== "sent");
+  const refresh = () => {
+    const count = open().filter((i) => ticked.get(i.key)).length;
+    sendBtn.textContent = t("shopping.send", { n: count });
+    sendBtn.disabled = !count;
+  };
+  const send = async (keys) => {
+    try {
+      result = await api("POST", `api/plans/${week}/push`, { keys });
+      adopt(await api("GET", url));
+      show();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  };
+  sendBtn.onclick = () => send(open().filter((i) => ticked.get(i.key)).map((i) => i.key));
+
+  const itemRow = (i) => {
+    const text = i.status === "more" ? `${i.name}: +${i.note}` : entryText(i);
+    const badge = el("span", { className: "badge " + (i.status === "sent" ? "ok" : ""), textContent: t(`shopping.status.${i.status}`) });
+    if (i.status === "sent") return el("li", { className: "row" }, el("span", { textContent: text }), badge);
+    const box = el("input", { type: "checkbox", checked: ticked.get(i.key), ariaLabel: i.name });
+    box.onchange = () => {
+      ticked.set(i.key, box.checked);
+      refresh();
+    };
+    return el("li", {}, el("label", { className: "row" }, el("span", {}, box, " " + text), badge));
+  };
+
+  const show = () => {
+    const failed = result ? open().filter((i) => result.failed.some((f) => f.name === i.name)).map((i) => i.key) : [];
+    const resend = el("button", { type: "button", className: "secondary", textContent: t("shopping.resend") });
+    resend.onclick = () => send(failed);
+    root.replaceChildren(
+      card(t("plan.week_label", { week }),
+        ...(data.items.length ? [el("ul", { className: "plain" }, ...data.items.map(itemRow)), el("div", { className: "actions" }, sendBtn)]
+          : [el("p", { className: "muted", textContent: t("shopping.empty") })])),
+      ...(result ? [pushPanel(result, ...(failed.length ? [el("div", { className: "actions" }, resend)] : []))] : []),
+      ...(data.no_longer_needed.length ? [card(t("push.no_longer_needed"),
+        el("ul", { className: "plain" }, ...data.no_longer_needed.map((e) => el("li", { textContent: entryText(e) }))))] : []));
+    refresh();
+  };
+  app.replaceChildren(el("h1", { textContent: t("shopping.title") }), el("a", { href: "#/woche/" + week, textContent: t("shopping.back") }), root);
+  show();
 }
 
 async function pageWeek(app, week) {
   let plan = await api("GET", "api/plans/" + week);
-  let pushResult = null; // result of the last push to Bring! (kept while this page is open)
   const root = el("div");
   const act = async (path, body) => {
     try {
       plan = await api("POST", `api/plans/${week}/${path}`, body ?? {});
-      if (plan.push) pushResult = plan.push;
       show();
       return true;
     } catch (e) {
@@ -728,15 +827,9 @@ async function pageWeek(app, week) {
     confirmBtn.onclick = async () => {
       if (await act("confirm")) toast(t("plan.confirmed"));
     };
-    const resend = el("button", { type: "button", className: "secondary", textContent: t("plan.resend") });
-    resend.onclick = async () => {
-      try {
-        pushResult = await api("POST", `api/plans/${week}/push`);
-        show();
-      } catch (e) {
-        toast(errorText(e));
-      }
-    };
+    const bring = el("button", { type: "button", className: "secondary", textContent: t("plan.send_bring"),
+      disabled: !plan.slots.some((s) => s.active && s.recipe) });
+    bring.onclick = () => { location.hash = `#/woche/${week}/einkauf`; };
     root.replaceChildren(
       el("div", { className: "week-nav" },
         el("a", { className: "btn secondary", href: "#/woche/" + shiftWeek(week, -1), textContent: "‹", ariaLabel: t("plan.prev") }),
@@ -744,11 +837,8 @@ async function pageWeek(app, week) {
         el("a", { className: "btn secondary", href: "#/woche/" + shiftWeek(week, 1), textContent: "›", ariaLabel: t("plan.next") })),
       el("div", { className: "row" },
         el("span", { className: "badge " + (plan.status === "confirmed" ? "ok" : ""), textContent: t(`plan.status.${plan.status}`) }),
-        el("a", { href: `#/woche/${week}/einkauf`, textContent: t("plan.shopping") }),
         el("a", { href: "#/woche/" + shiftWeek(weekOf(new Date()), 1), textContent: t("plan.next_week") })),
-      el("div", { className: "actions" }, generate, confirmBtn, ...(plan.status === "confirmed" ? [resend] : [])),
-      ...(plan.status === "confirmed" ? [el("p", { className: "muted", textContent: t("plan.resend_hint") })] : []),
-      ...(pushResult ? [pushPanel(pushResult)] : []),
+      el("div", { className: "actions" }, generate, confirmBtn, bring),
       ...plan.dates.map((iso, day) => card(
         parseDate(iso).toLocaleDateString(lang, { weekday: "long", day: "numeric", month: "numeric" }),
         ...plan.slots.filter((s) => s.day === day).map(slotView),

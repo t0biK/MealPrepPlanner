@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import VERSION, db, ha, ingredients, plans, planner, recipes, shopping, worker
+from . import VERSION, ai, db, ha, ingredients, plans, planner, recipes, shopping, worker
 
 INGRESS_IP = "172.30.32.2"
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -110,7 +110,7 @@ def _part(resp, *path):
     return resp
 
 
-def check_ha(conn):
+def check_ha(conn, body):
     cfg = ha.get_config()
     now = datetime.now().astimezone()
     return {"ok": True, "details": {
@@ -123,7 +123,7 @@ def check_ha(conn):
     }}
 
 
-def check_bring(conn):
+def check_bring(conn, body):
     entity = db.get_settings(conn)["bring_entity"]
     if not entity:
         return {"ok": False, "details": {"error": "bring_entity not set"}}
@@ -169,7 +169,7 @@ def check_bring(conn):
     return {"ok": ok, "details": steps}
 
 
-def check_ai(conn):
+def check_ai(conn, body):
     entity = db.get_settings(conn)["ai_entity"]
     if not entity:
         return {"ok": False, "details": {"error": "ai_entity not set"}}
@@ -211,14 +211,30 @@ def check_ai(conn):
     return {"ok": any(r["parsed_ok"] for r in results), "details": results}
 
 
-def check_sensor(conn):
+def check_sensor(conn, body):
     ha.post_state("sensor.essensplan", "Systemcheck",
                   {"friendly_name": "Essensplan", "icon": "mdi:silverware-fork-knife"})
     back = ha.get_state("sensor.essensplan")
     return {"ok": _part(back, "state") == "Systemcheck", "details": back}
 
 
-CHECKS = {"ha": check_ha, "bring": check_bring, "ai": check_ai, "sensor": check_sensor}
+# V9 candidates for "Bring! öffnen". Found: only Bring! Web, named as the fallback of a third-party WordPress plugin
+# (github.com/alexanderherbst/ahx_wp_recipe). No documented link opens the Bring! app itself.
+BRING_OPEN_CANDIDATES = [("web", "https://web.getbring.com/")]
+
+
+def check_bring_links(conn, body):
+    """V8/V9 phone test: the import link for a public recipe URL (as the recipe page emits it, and with quantities)
+    plus the candidate links that might open the Bring! app. Nothing is sent anywhere."""
+    url = body.get("url")
+    if not recipes.http_url(url):
+        raise db.InvalidField("url")
+    links = [("import", recipes.bring_import_url(url)), ("import_scaled", recipes.bring_import_url(url, 4, 2)),
+             *(("open_" + name, link) for name, link in BRING_OPEN_CANDIDATES)]
+    return {"ok": True, "details": {"links": [{"name": n, "url": u} for n, u in links]}}
+
+
+CHECKS = {"ha": check_ha, "bring": check_bring, "ai": check_ai, "sensor": check_sensor, "bring_links": check_bring_links}
 
 
 def api_check(h, m):
@@ -227,7 +243,7 @@ def api_check(h, m):
     if name not in CHECKS:
         raise db.InvalidField("check")
     try:
-        result = CHECKS[name](h.conn)
+        result = CHECKS[name](h.conn, body)
     except ha.HAError as e:
         result = {"ok": False, "details": {"error": e.code, "status": e.status}}
     h.send_json(200, result)
@@ -280,7 +296,8 @@ def api_create_recipe(h, m):
 
 def api_get_recipe(h, m):
     recipe = _recipe_or_404(h, m)
-    h.send_json(200, {**recipe, **recipes.rating_info(h.conn, recipe["id"], h.user["id"])})
+    bring = recipes.bring_import_url(recipe["source_url"]) if recipe["source_kind"] == "web" and recipe["source_url"] else None
+    h.send_json(200, {**recipe, **recipes.rating_info(h.conn, recipe["id"], h.user["id"]), "bring_import_url": bring})
 
 
 def api_put_rating(h, m):
@@ -458,6 +475,20 @@ def api_import_text(h, m):
     h.send_json(200, _job_json(_job_row(h, m)))
 
 
+def api_estimate_nutrition(h, m):
+    """AI guess of the nutrition per portion for a draft (title, servings, ingredients); saves nothing (M10)."""
+    draft, errors = recipes.validate_draft(_body_dict(h).get("draft"), [t["name"] for t in recipes.list_tags(h.conn)])
+    if errors:
+        raise db.InvalidField(next(iter(errors)) or "draft")
+    if not draft["ingredients"]:
+        raise db.InvalidField("ingredients")
+    settings = db.get_settings(h.conn)
+    nutrition = ai.estimate_nutrition(draft, settings["ai_entity"] if settings["ai_enabled"] else None)
+    if nutrition is None:
+        raise ApiError(502, "ai_failed")
+    h.send_json(200, {"nutrition": nutrition})
+
+
 def api_image(h, m):
     try:
         body = (h.server.data_dir / "images" / m.group(1)).read_bytes()
@@ -514,30 +545,28 @@ def api_plan_slot(h, m):
 
 
 def api_confirm_plan(h, m):
-    """Confirm, then push to Bring!; the plan stays confirmed when the push fails (`push.error`)."""
+    """Only confirms; nothing goes to Bring! (M10)."""
     week = _week(m)
     plans.confirm(h.conn, week, db.get_settings(h.conn))
     worker.notify_plan_changed()
-    try:
-        push = shopping.push(h.conn, week)
-    except shopping.BringFailed:
-        push = {"error": "bring_failed"}
-    h.send_json(200, {**_plan_json(h, week), "push": push})
+    h.send_json(200, _plan_json(h, week))
 
 
-# ---- shopping list and Bring! push (M8) ----
+# ---- shopping list and Bring! push (M8, M10) ----
 
 def api_get_shopping(h, m):
     h.send_json(200, shopping.view(h.conn, _week(m)))
 
 
 def api_push_plan(h, m):
+    """Push the ticked items; `keys` must be 1-500 keys of the current checklist."""
     week = _week(m)
-    row = h.conn.execute("SELECT status FROM plans WHERE week = ?", (week,)).fetchone()
-    if row is None or row["status"] != "confirmed":
-        raise ApiError(400, "bad_request")
+    keys = _body_dict(h).get("keys")
+    valid = {i["key"] for i in shopping.view(h.conn, week)["items"]}
+    if not isinstance(keys, list) or not 1 <= len(keys) <= 500 or not all(isinstance(k, str) and k in valid for k in keys):
+        raise db.InvalidField("keys")
     try:
-        h.send_json(200, shopping.push(h.conn, week))
+        h.send_json(200, shopping.push(h.conn, week, set(keys)))
     except shopping.BringFailed:
         raise ApiError(502, "bring_failed")
 
@@ -574,6 +603,7 @@ ROUTES = [
     ("POST", re.compile(r"^/api/imports/(\d+)/discard$"), api_discard_import),
     ("POST", re.compile(r"^/api/imports/(\d+)/retry$"), api_retry_import),
     ("POST", re.compile(r"^/api/imports/(\d+)/text$"), api_import_text),
+    ("POST", re.compile(r"^/api/nutrition/estimate$"), api_estimate_nutrition),
     ("GET", re.compile(r"^/api/recipes$"), api_list_recipes),
     ("POST", re.compile(r"^/api/recipes$"), api_create_recipe),
     ("GET", re.compile(r"^/api/recipes/(\d+)$"), api_get_recipe),

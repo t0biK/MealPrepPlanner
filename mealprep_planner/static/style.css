@@ -628,3 +628,7 @@ button.pick-card {
 .pattern input[type="checkbox"]::after {
   display: none;
 }
+
+ul.plain a {
+  overflow-wrap: anywhere;
+}

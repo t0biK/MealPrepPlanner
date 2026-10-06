@@ -111,9 +111,11 @@ class ShoppingTestCase(unittest.TestCase):
         with mock.patch.object(ha, "get_state", return_value={}):
             db.set_settings(self.conn, {"bring_entity": BRING})
 
-    def push(self, stub):
+    def push(self, stub, keys=None):
+        if keys is None:  # the checklist's default ticks
+            keys = {i["key"] for i in shopping.view(self.conn, WEEK)["items"] if i["checked"]}
         with mock.patch.object(ha, "call_service", stub):
-            return shopping.push(self.conn, WEEK)
+            return shopping.push(self.conn, WEEK, keys)
 
     def pushed(self):
         return {(r["name"], r["unit_key"]): r["amount"]
@@ -126,16 +128,18 @@ class BuildListTest(ShoppingTestCase):
         r2 = self.recipe(2, [(1, "kg", "Spaghetti"), (1, "Dose", "Tomaten")])
         self.slot(0, "lunch", r1, portions=2)
         self.slot(0, "dinner", r2, portions=6)
-        items, _ = shopping.build_list(self.conn, WEEK)
+        items = shopping.build_list(self.conn, WEEK)
         self.assertEqual({k: i["amounts"] for k, i in items.items()},
-                         {"spaghetti": {"g": 3200}, "eier": {"": 2}, "tomaten": {"Dose": 4}})  # 200 + 3000 g; 0.5 + 3 Dosen -> 4
+                         {"spaghetti": {"g": 3200}, "eier": {"": 2}, "salz": {}, "tomaten": {"Dose": 4}})  # 200 + 3000 g; 0.5 + 3 Dosen -> 4
 
-    def test_pantry_excluded_case_insensitively_and_reported(self):
+    def test_pantry_items_are_kept_and_flagged_case_insensitively(self):
         rid = self.recipe(2, [(None, None, "salz"), (2, "EL", "Olivenöl"), (200, "g", "Nudeln"), (1, "EL", "zucker")])
         self.slot(0, "lunch", rid)
-        items, skipped = shopping.build_list(self.conn, WEEK)
-        self.assertEqual(list(items), ["nudeln"])
-        self.assertEqual(skipped, ["Olivenöl", "salz", "zucker"])
+        items = shopping.build_list(self.conn, WEEK)
+        self.assertEqual({k: i["pantry"] for k, i in items.items()},
+                         {"salz": True, "olivenöl": True, "nudeln": False, "zucker": True})
+        self.assertEqual(items["salz"], {"name": "salz", "amounts": {}, "pantry": True})
+        self.assertEqual(items["zucker"]["amounts"], {"EL": 1})
 
     def test_only_active_unskipped_filled_slots(self):
         rid = self.recipe(2, [(1, None, "Ei")])
@@ -143,9 +147,9 @@ class BuildListTest(ShoppingTestCase):
         self.slot(0, "dinner", rid, active=0)
         self.slot(1, "lunch", rid, skipped=1)
         self.slot(1, "dinner", None)
-        items, _ = shopping.build_list(self.conn, WEEK)
+        items = shopping.build_list(self.conn, WEEK)
         self.assertEqual(items["ei"]["amounts"], {"": 1})
-        self.assertEqual(shopping.build_list(self.conn, "2031-W01"), ({}, []))
+        self.assertEqual(shopping.build_list(self.conn, "2031-W01"), {})
 
 
 class DiffTest(unittest.TestCase):
@@ -206,7 +210,8 @@ class PushTest(ShoppingTestCase):
         self.assertEqual(sorted(stub.writes()), [("add_item", "Basilikum", None), ("add_item", "Hafer", "500 g"),
                                                  ("add_item", "Kartoffeln", "1,5 kg"), ("add_item", "Tomaten", "2 Dosen")])
         self.assertEqual([e["name"] for e in result["added"]], ["Basilikum", "Hafer", "Kartoffeln", "Tomaten"])
-        self.assertEqual((result["updated"], result["failed"], result["no_longer_needed"], result["skipped_pantry"]), ([], [], [], ["Salz"]))
+        self.assertEqual((result["updated"], result["failed"], result["no_longer_needed"]), ([], [], []))
+        self.assertEqual(sorted(result), ["added", "failed", "no_longer_needed", "updated"])
         self.assertEqual(self.pushed(), {("Basilikum", ""): None, ("Kartoffeln", "g"): 1500, ("Hafer", "g"): 500, ("Tomaten", "Dose"): 2})
         self.assertEqual(stub.calls[0][1]["status"], ["needs_action"])
 
@@ -318,11 +323,11 @@ class PushTest(ShoppingTestCase):
         self.slot(0, "lunch", self.recipe(2, [(1, None, "Apfel")]))
         for bad in (ha.HAError(None, "ha_unavailable"), ha.HAError(500, "ha_error")):
             with mock.patch.object(ha, "call_service", side_effect=bad), self.assertRaises(shopping.BringFailed):
-                shopping.push(self.conn, WEEK)
+                shopping.push(self.conn, WEEK, {"apfel"})
         for resp in (None, {}, {"service_response": {}}, {"service_response": {BRING: {"items": "x"}}},
                      {"service_response": {BRING: {"items": None}}}):
             with mock.patch.object(ha, "call_service", return_value=resp), self.assertRaises(shopping.BringFailed):
-                shopping.push(self.conn, WEEK)
+                shopping.push(self.conn, WEEK, {"apfel"})
         self.assertEqual(self.pushed(), {})
 
     def test_untrusted_items_are_skipped(self):
@@ -334,14 +339,53 @@ class PushTest(ShoppingTestCase):
         self.assertEqual(stub.writes(), [("update_item", "Milch", "1 l")])  # no usable uid: addressed by name
         self.assertEqual(len(result["updated"]), 1)
 
-    def test_view_shows_status_per_item(self):
+    def test_push_only_the_given_keys(self):
         self.configure()
-        self.slot(0, "lunch", self.recipe(2, [(500, "g", "Hafer"), (None, None, "Salz")]))
-        self.assertEqual(shopping.view(self.conn, WEEK),
-                         {"items": [{"name": "Hafer", "note": "500 g", "status": "pending"}], "pantry": ["Salz"], "no_longer_needed": []})
-        self.push(StubBring())
-        self.slot(0, "dinner", self.recipe(2, [(100, "g", "Hafer")]))
-        self.assertEqual(shopping.view(self.conn, WEEK)["items"], [{"name": "Hafer", "note": "600 g", "status": "pending"}])
+        self.slot(0, "lunch", self.recipe(2, [(500, "g", "Hafer"), (1, None, "Ei"), (2, None, "Birne")]))
+        stub = StubBring()
+        result = self.push(stub, {"hafer", "birne"})
+        self.assertEqual([e["name"] for e in result["added"]], ["Birne", "Hafer"])
+        self.assertEqual(sorted(w[1] for w in stub.writes()), ["Birne", "Hafer"])
+        self.assertEqual(self.pushed(), {("Hafer", "g"): 500, ("Birne", ""): 2})
+        self.assertEqual([i["key"] for i in shopping.view(self.conn, WEEK)["items"] if i["status"] == "new"], ["ei"])
+        stub = StubBring()
+        self.assertEqual(self.push(stub, set())["added"], [])  # no key: nothing to send, no write
+        self.assertEqual(stub.writes(), [])
+        self.assertEqual([e["name"] for e in self.push(stub, {"ei", "unknown"})["added"]], ["Ei"])
+
+    def test_ticked_pantry_item_is_sent_and_recorded(self):
+        self.configure()
+        self.slot(0, "lunch", self.recipe(2, [(2, "EL", "Olivenöl"), (200, "g", "Nudeln")]))
+        stub = StubBring()
+        self.assertEqual([e["name"] for e in self.push(stub)["added"]], ["Nudeln"])  # default: pantry unticked
+        result = self.push(stub, {"olivenöl"})
+        self.assertEqual(result["added"], [{"name": "Olivenöl", "note": "2 EL"}])
+        self.assertEqual(stub.writes()[-1], ("add_item", "Olivenöl", "2 EL"))
+        self.assertEqual(self.pushed(), {("Nudeln", "g"): 200, ("Olivenöl", "EL"): 2})
+        self.assertEqual({i["key"]: i["status"] for i in shopping.view(self.conn, WEEK)["items"]},
+                         {"nudeln": "sent", "olivenöl": "sent"})
+
+    def test_push_on_a_draft_plan(self):
+        self.configure()
+        with self.conn:
+            self.conn.execute("UPDATE plans SET status = 'draft' WHERE week = ?", (WEEK,))
+        self.slot(0, "lunch", self.recipe(2, [(500, "g", "Hafer")]))
+        self.assertEqual([e["name"] for e in self.push(StubBring())["added"]], ["Hafer"])
+
+    def test_view_statuses_and_default_ticks(self):
+        self.configure()
+        self.slot(0, "lunch", self.recipe(2, [(500, "g", "Hafer"), (None, None, "SALZ"), (2, "EL", "Olivenöl"), (1, None, "Ei")]))
+        item = lambda **kw: {"key": kw["name"].casefold(), "note": "", "status": "new", "checked": True, **kw}
+        self.assertEqual(shopping.view(self.conn, WEEK), {"items": [
+            item(name="Ei", note="1"), item(name="Hafer", note="500 g"),
+            item(name="Olivenöl", note="2 EL", status="pantry", checked=False),
+            item(name="SALZ", status="pantry", checked=False)], "no_longer_needed": []})
+        self.push(StubBring())  # new items only; the pantry names stay unticked
+        self.slot(0, "dinner", self.recipe(2, [(100, "g", "Hafer"), (1, None, "Ei")]))
+        view = shopping.view(self.conn, WEEK)
+        self.assertEqual({i["name"]: (i["status"], i["note"], i["checked"]) for i in view["items"]},
+                         {"Ei": ("more", "1", True),  # 1 sent, 2 needed: the difference
+                          "Hafer": ("more", "100 g", True), "Olivenöl": ("pantry", "2 EL", False), "SALZ": ("pantry", "", False)})
 
 
 class PantryTest(ShoppingTestCase):

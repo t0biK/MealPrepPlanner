@@ -302,7 +302,7 @@ class DevServerTest(unittest.TestCase):
         finally:
             self.call("PUT", "/api/pantry", {"names": db.DEFAULT_PANTRY})
 
-    def test_shopping_list_confirm_and_push(self):
+    def test_shopping_checklist_confirm_and_push(self):
         week = "2030-W11"
         rid = self.call("POST", "/api/recipes", {
             "format_version": 1, "title": "Einkauf", "servings": 2,
@@ -313,14 +313,11 @@ class DevServerTest(unittest.TestCase):
             self.assertEqual(self.call("GET", f"/api/plans/{bad}/shopping")[1]["field"], "week")
             self.assertEqual(self.call("POST", f"/api/plans/{bad}/push")[1]["field"], "week")
         post("slots/0/lunch", {"action": "set", "recipe_id": rid})
-        self.assertEqual(self.call("GET", f"/api/plans/{week}/shopping")[1], {
-            "items": [{"name": "Nudeln", "note": "500 g", "status": "pending"}], "pantry": ["Salz"], "no_longer_needed": []})
-        self.assertEqual(post("push"), (400, {"error": "bad_request"}))  # only a confirmed plan is pushed
-
-        # no Bring! list chosen: the plan is confirmed anyway, the push reports bring_failed
-        status, plan = post("confirm")
-        self.assertEqual((status, plan["status"], plan["push"]), (200, "confirmed", {"error": "bring_failed"}))
-        self.assertEqual(post("push"), (502, {"error": "bring_failed"}))
+        self.assertEqual(self.call("GET", f"/api/plans/{week}/shopping")[1], {"items": [
+            {"key": "nudeln", "name": "Nudeln", "note": "500 g", "status": "new", "checked": True},
+            {"key": "salz", "name": "Salz", "note": "", "status": "pantry", "checked": False}], "no_longer_needed": []})
+        for bad in (None, [], "nudeln", [5], ["nope"], ["nudeln", "nope"], ["nudeln"] * 501):  # keys of the current checklist only
+            self.assertEqual(post("push", {"keys": bad} if bad is not None else {}), (400, {"error": "invalid_field", "field": "keys"}))
 
         calls = []
 
@@ -328,21 +325,91 @@ class DevServerTest(unittest.TestCase):
             calls.append((service, data["item"] if service != "get_items" else None, data.get("description")))
             return {"service_response": {data["entity_id"]: {"items": []}}}
 
+        # "Bestätigen" only confirms: nothing is sent, no push in the answer
+        with mock.patch.object(ha, "call_service", stub):
+            status, plan = post("confirm")
+        self.assertEqual((status, plan["status"], "push" in plan, calls), (200, "confirmed", False, []))
+
+        # no Bring! list chosen: pushing reports bring_failed
+        self.assertEqual(post("push", {"keys": ["nudeln"]}), (502, {"error": "bring_failed"}))
+
         with mock.patch.object(ha, "get_state", return_value={}):
             self.call("PUT", "/api/settings", {"bring_entity": "todo.bring"})
         try:
             with mock.patch.object(ha, "call_service", stub):
-                status, plan = post("confirm")
-                self.assertEqual((status, plan["status"]), (200, "confirmed"))
-                self.assertEqual(plan["push"], {"added": [{"name": "Nudeln", "note": "500 g"}], "updated": [], "skipped_pantry": ["Salz"],
-                                                "no_longer_needed": [], "failed": []})
-                self.assertEqual(calls, [("get_items", None, None), ("add_item", "Nudeln", "500 g")])
-                self.assertEqual(self.call("GET", f"/api/plans/{week}/shopping")[1]["items"],
-                                 [{"name": "Nudeln", "note": "500 g", "status": "pushed"}])
-                status, result = post("push")  # nothing left to send
-                self.assertEqual((status, result["added"], len(calls)), (200, [], 2))
+                status, result = post("push", {"keys": ["nudeln", "salz"]})  # the pantry item was ticked by hand
+                self.assertEqual((status, result), (200, {"added": [{"name": "Nudeln", "note": "500 g"}, {"name": "Salz", "note": ""}],
+                                                          "updated": [], "failed": [], "no_longer_needed": []}))
+                self.assertEqual(calls, [("get_items", None, None), ("add_item", "Nudeln", "500 g"), ("add_item", "Salz", None)])
+                self.assertEqual([i["status"] for i in self.call("GET", f"/api/plans/{week}/shopping")[1]["items"]], ["sent", "sent"])
+                status, result = post("push", {"keys": ["nudeln"]})  # nothing left to send
+                self.assertEqual((status, result["added"], len(calls)), (200, [], 3))
         finally:
             self.call("PUT", "/api/settings", {"bring_entity": None})
+
+    def test_push_works_on_a_draft_plan(self):
+        week = "2030-W13"
+        rid = self.call("POST", "/api/recipes", {"format_version": 1, "title": "Entwurf", "servings": 2,
+                        "ingredients": [{"amount": 1, "unit": None, "name": "Ei"}]})[1]["id"]
+        self.call("POST", f"/api/plans/{week}/slots/0/lunch", {"action": "set", "recipe_id": rid})
+        self.assertEqual(self.call("GET", f"/api/plans/{week}")[1]["status"], "draft")
+        stub = lambda domain, service, data, return_response=False, timeout=10: {"service_response": {data["entity_id"]: {"items": []}}}
+        with mock.patch.object(ha, "get_state", return_value={}):
+            self.call("PUT", "/api/settings", {"bring_entity": "todo.bring"})
+        try:
+            with mock.patch.object(ha, "call_service", stub):
+                status, result = self.call("POST", f"/api/plans/{week}/push", {"keys": ["ei"]})
+            self.assertEqual((status, result["added"]), (200, [{"name": "Ei", "note": "1"}]))
+        finally:
+            self.call("PUT", "/api/settings", {"bring_entity": None})
+
+    def test_nutrition_estimate_api(self):
+        draft = {"format_version": 1, "title": "Schätzung", "servings": 2,
+                 "ingredients": [{"amount": 200, "unit": "g", "name": "Nudeln"}]}
+        before = len(self.call("GET", "/api/recipes")[1])
+        post = lambda body: self.call("POST", "/api/nutrition/estimate", body)
+        self.assertEqual(post({"draft": draft}), (502, {"error": "ai_failed"}))  # no AI entity chosen
+        self.assertEqual(post({})[1], {"error": "invalid_field", "field": "draft"})
+        self.assertEqual(post({"draft": {**draft, "title": ""}})[1]["field"], "title")
+        self.assertEqual(post({"draft": {**draft, "ingredients": []}})[1]["field"], "ingredients")
+
+        calls = []
+
+        def stub(domain, service, data, return_response=False, timeout=10):
+            calls.append(data["instructions"])
+            return {"service_response": {"data": '```json\n{"kcal": 640, "protein_g": 22, "fat_g": 9999, "carbs_g": 90}\n```'}}
+
+        with mock.patch.object(ha, "get_state", return_value={}):
+            self.call("PUT", "/api/settings", {"ai_entity": "ai_task.test"})
+        try:
+            with mock.patch.object(ha, "call_service", stub):
+                status, body = post({"draft": draft})
+                self.assertEqual((status, body), (200, {"nutrition": {"kcal": 640, "protein_g": 22, "fat_g": None, "carbs_g": 90, "source": "ai"}}))
+                self.assertIn("Schätzung", calls[0])
+                self.call("PUT", "/api/settings", {"ai_enabled": False})
+                self.assertEqual(post({"draft": draft}), (502, {"error": "ai_failed"}))
+                self.assertEqual(len(calls), 1)  # AI switched off: no call
+        finally:
+            self.call("PUT", "/api/settings", {"ai_entity": None, "ai_enabled": True})
+        self.assertEqual(len(self.call("GET", "/api/recipes")[1]), before)  # nothing is saved
+
+    def test_bring_import_link_and_systemcheck_links(self):
+        mk = lambda **kw: self.call("POST", "/api/recipes", {"format_version": 1, "title": "Link", "servings": 2, **kw})[1]["id"]
+        web = mk(source_kind="web", source_url="https://www.example.com/r?a=1&b=2")
+        self.assertEqual(self.call("GET", f"/api/recipes/{web}")[1]["bring_import_url"],
+                         "https://api.getbring.com/rest/bringrecipes/deeplink?url=https%3A%2F%2Fwww.example.com%2Fr%3Fa%3D1%26b%3D2&source=web")
+        for kind in ({"source_kind": "manual"}, {"source_kind": "tiktok", "source_url": "https://www.tiktok.com/@a/video/1"}, {"source_kind": "web"}):
+            self.assertIsNone(self.call("GET", f"/api/recipes/{mk(**kind)}")[1]["bring_import_url"])
+
+        status, body = self.call("POST", "/api/system/check", {"check": "bring_links", "url": "https://www.example.com/r"})
+        self.assertEqual((status, body["ok"]), (200, True))
+        links = {l["name"]: l["url"] for l in body["details"]["links"]}
+        plain = "https://api.getbring.com/rest/bringrecipes/deeplink?url=https%3A%2F%2Fwww.example.com%2Fr&source=web"
+        self.assertEqual((links["import"], links["import_scaled"]), (plain, plain + "&baseQuantity=4&requestedQuantity=2"))
+        self.assertTrue(all(u.startswith("https://") for u in links.values()))
+        for bad in (None, "", "javascript:alert(1)", "ftp://example.com/x", 5):
+            self.assertEqual(self.call("POST", "/api/system/check", {"check": "bring_links", "url": bad})[1],
+                             {"error": "invalid_field", "field": "url"})
 
     def test_tag_crud(self):
         status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})

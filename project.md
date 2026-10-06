@@ -921,7 +921,7 @@ Goal: nothing reaches Bring! unless a person ticks it; Chefkoch-style Bring! imp
 - [ ] "In Bring! importieren" on an imported Chefkoch recipe opens Bring!'s import screen on Android and iOS; V8 filled (manual, phone).
 - [ ] "Bring! öffnen" opens the Bring! app, or V9 records that no link works and the button is left out (manual, phone).
 - [ ] "Nährwerte schätzen" fills the four values of a manual recipe within 60 s; on a Chefkoch recipe it asks before overwriting (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M11 – Household and eaters
 

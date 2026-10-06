@@ -2,7 +2,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from . import db, planner
 from .ingredients import UNITS
@@ -40,6 +40,15 @@ def http_url(v):
         return False
     parts = urlsplit(v)
     return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+def bring_import_url(source_url, servings=None, portions=None):
+    """Bring!'s recipe import link for a public page: Bring!'s servers read `source_url` (§3, V8).
+    The quantity parameters are added only when both are given (the app does not send them until V8 confirms them)."""
+    url = "https://api.getbring.com/rest/bringrecipes/deeplink?url=" + quote(source_url, safe="") + "&source=web"
+    if servings is not None and portions is not None:
+        url += f"&baseQuantity={servings}&requestedQuantity={portions}"
+    return url
 
 
 def validate_draft(obj, tag_names, images_dir=None):

@@ -275,5 +275,24 @@ class StoreTest(unittest.TestCase):
             recipes.set_rating(self.conn, "nobody", a, 3)
 
 
+class BringImportUrlTest(unittest.TestCase):
+    BASE = "https://api.getbring.com/rest/bringrecipes/deeplink?url="
+
+    def test_url_is_encoded_completely(self):
+        self.assertEqual(recipes.bring_import_url("https://www.chefkoch.de/rezepte/1/pasta.html"),
+                         self.BASE + "https%3A%2F%2Fwww.chefkoch.de%2Frezepte%2F1%2Fpasta.html&source=web")
+        self.assertEqual(recipes.bring_import_url("https://example.com/r?a=1&b=2#schritt"),
+                         self.BASE + "https%3A%2F%2Fexample.com%2Fr%3Fa%3D1%26b%3D2%23schritt&source=web")
+        self.assertEqual(recipes.bring_import_url("https://example.com/Käse & Brot?q=süß"),
+                         self.BASE + "https%3A%2F%2Fexample.com%2FK%C3%A4se%20%26%20Brot%3Fq%3Ds%C3%BC%C3%9F&source=web")
+
+    def test_quantities_only_when_both_are_given(self):
+        url = "https://example.com/r"
+        plain = recipes.bring_import_url(url)
+        self.assertNotIn("Quantity", plain)
+        self.assertEqual(recipes.bring_import_url(url, 4), plain)
+        self.assertEqual(recipes.bring_import_url(url, 4, 2), plain + "&baseQuantity=4&requestedQuantity=2")
+
+
 if __name__ == "__main__":
     unittest.main()

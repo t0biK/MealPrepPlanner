@@ -1,6 +1,6 @@
-"""Shopping list (M8): build it from a week plan, diff it against what was pushed before, push the rest to Bring!.
+"""Shopping list (M8, M10): build it from a week plan, diff it against what was pushed before, push the ticked items to Bring!.
 
-item: {name, amounts: {unit_key: amount}}; an empty `amounts` means "no amount" (e.g. Salz).
+item: {name, amounts: {unit_key: amount}}; an empty `amounts` means "no amount" (e.g. Salz). `build_list` adds `pantry: bool`.
 current / to_push / no_longer_needed: {name.casefold(): item}   pushed: {(name.casefold(), unit_key): {name, amount}}
 """
 import threading
@@ -41,14 +41,13 @@ def set_pantry(conn, names):
 
 
 def build_list(conn, week):
-    """(items, skipped_pantry): what the week needs (active, non-skipped, filled slots; amounts scaled by
-    portions / servings), without pantry names (case-insensitive), plus the display names left out."""
+    """What the week needs (active, non-skipped, filled slots; amounts scaled by portions / servings), with
+    `pantry` set on the names of the pantry list (case-insensitive)."""
     items = ingredients.aggregate(
         (r["name"], ingredients.scale(r["amount"], r["portions"] / r["servings"]), r["unit"])
         for r in conn.execute(SLOTS_SQL + " ORDER BY s.day, s.meal = 'dinner', i.pos", (week,)))
     pantry = {n.casefold() for n in get_pantry(conn)}
-    skipped = sorted((i["name"] for k, i in items.items() if k in pantry), key=str.casefold)
-    return {k: i for k, i in items.items() if k not in pantry}, skipped
+    return {k: {**i, "pantry": k in pantry} for k, i in items.items()}
 
 
 def pushed_items(conn, week):
@@ -90,11 +89,21 @@ def _entry(item):
 
 
 def view(conn, week):
-    """The shopping list as the API returns it: status per item, pantry names left out, no longer needed."""
-    current, skipped = build_list(conn, week)
-    to_push, gone = diff(current, pushed_items(conn, week))
-    return {"items": [{**_entry(i), "status": "pending" if k in to_push else "pushed"} for k, i in sorted(current.items())],
-            "pantry": skipped, "no_longer_needed": [_entry(i) for _, i in sorted(gone.items())]}
+    """The checklist as the API returns it. Status per item: `new` (never sent), `more` (sent before, more needed now;
+    the note is the difference), `pantry` (not sent yet; the note is the full amount), `sent` (nothing new). New and
+    more are ticked by default. Plus what is no longer needed."""
+    current = build_list(conn, week)
+    pushed = pushed_items(conn, week)
+    to_push, gone = diff(current, pushed)
+    names_pushed = {nk for nk, _ in pushed}
+    items = []
+    for k, i in sorted(current.items()):
+        if k not in to_push:
+            status, entry = "sent", _entry(i)
+        else:
+            status, entry = "more" if k in names_pushed else "pantry" if i["pantry"] else "new", _entry(to_push[k])
+        items.append({"key": k, **entry, "status": status, "checked": status in ("new", "more")})
+    return {"items": items, "no_longer_needed": [_entry(i) for _, i in sorted(gone.items())]}
 
 
 def _open_items(entity):
@@ -146,19 +155,20 @@ def _lower(conn, week, current, pushed):
                 conn.execute("DELETE FROM pushed_items WHERE week = ? AND name = ? AND unit_key = ?", (week, row["name"], key))
 
 
-def push(conn, week):
-    """Push what is new or increased since the last push to the Bring! list. Every successful call is recorded
-    at once, so a partial failure can be resumed. Returns {added, updated, skipped_pantry, no_longer_needed, failed};
-    raises BringFailed when Bring! is not reachable at all."""
+def push(conn, week, keys):
+    """Push the given items (keys = name.casefold()) that are new or increased since the last push to the Bring! list.
+    Every successful call is recorded at once, so a partial failure can be resumed. Returns
+    {added, updated, failed, no_longer_needed}; raises BringFailed when Bring! is not reachable at all."""
     entity = db.get_settings(conn)["bring_entity"]
     if not entity:
         raise BringFailed
     with _push_lock:
-        current, skipped = build_list(conn, week)
+        current = build_list(conn, week)
         pushed = pushed_items(conn, week)
         to_push, gone = diff(current, pushed)
-        result = {"added": [], "updated": [], "skipped_pantry": skipped,
-                  "no_longer_needed": [_entry(i) for _, i in sorted(gone.items())], "failed": []}
+        to_push = {k: i for k, i in to_push.items() if k in keys}
+        result = {"added": [], "updated": [], "failed": [],
+                  "no_longer_needed": [_entry(i) for _, i in sorted(gone.items())]}
         open_items = _open_items(entity) if to_push else {}
         _lower(conn, week, current, pushed)  # only once Bring! answered, so a BringFailed keeps the list for the retry
         if not to_push:

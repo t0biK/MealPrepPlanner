@@ -262,5 +262,36 @@ class FromTextTest(unittest.TestCase):
             self.assertEqual(ai.from_text("x", [], TAGS, ENTITY, base()), (None, ["ai_failed"]))
 
 
+class EstimateNutritionTest(unittest.TestCase):
+    def estimate(self, data, entity=ENTITY):
+        with mock.patch.object(ha, "call_service", return_value=data) as call:
+            return ai.estimate_nutrition(draft(title="Pasta", servings=3), entity), call
+
+    def test_valid_answer(self):
+        answer = {"kcal": 640, "protein_g": 22.5, "fat_g": 18, "carbs_g": 90}
+        for data in (reply(fenced(answer)), reply(json.dumps(answer)), reply(answer)):
+            nutrition, call = self.estimate(data)
+            self.assertEqual(nutrition, {**answer, "source": "ai"})
+        prompt = call.call_args.args[2]["instructions"]
+        for part in ("Pasta", "Portionen: 3", "Salz und Pfeffer", "pro Portion"):
+            self.assertIn(part, prompt)
+        self.assertNotIn("structure", call.call_args.args[2])
+
+    def test_out_of_range_values_are_dropped(self):
+        nutrition, _ = self.estimate(reply(fenced({"kcal": 5001, "protein_g": -1, "fat_g": "viel", "carbs_g": 500, "evil": 1})))
+        self.assertEqual(nutrition, {"kcal": None, "protein_g": None, "fat_g": None, "carbs_g": 500, "source": "ai"})
+        self.assertIsNone(self.estimate(reply(fenced({"kcal": 9999, "protein_g": 501})))[0])  # nothing usable left
+
+    def test_unusable_answers_and_ai_off(self):
+        for data in (reply("Das sind etwa 600 kcal."), reply('{"kcal": 6'), reply("[1]"), reply(None), {}, {"service_response": {}}):
+            self.assertIsNone(self.estimate(data)[0], data)
+        nutrition, call = self.estimate(reply(fenced({"kcal": 600})), entity=None)
+        self.assertIsNone(nutrition)
+        call.assert_not_called()
+        for error in (ha.HAError(None, "ha_unavailable"), ha.HAError(500, "ha_error")):
+            with mock.patch.object(ha, "call_service", side_effect=error):
+                self.assertIsNone(ai.estimate_nutrition(draft(), ENTITY))
+
+
 if __name__ == "__main__":
     unittest.main()
