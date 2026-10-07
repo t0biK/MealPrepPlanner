@@ -1022,7 +1022,7 @@ Goal: nothing reaches Bring! unless a person ticks it; Chefkoch-style Bring! imp
 **Acceptance**
 - [ ] "Di Mittag = Reste von Mo Abend" shows the same recipe on Tuesday, raises Monday's cooked portions and adds nothing extra to the checklist (manual).
 - [ ] "Vorschlag erstellen" leaves leftover slots alone (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ## 10. Testing
 

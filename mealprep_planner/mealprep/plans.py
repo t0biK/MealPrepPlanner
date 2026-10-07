@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from . import db, planner, recipes
 
-ACTIONS = ("reroll", "set", "clear", "lock", "unlock", "activate", "deactivate", "eater", "guests", "rule", "skip", "unskip")
+ACTIONS = ("reroll", "set", "clear", "lock", "unlock", "activate", "deactivate", "eater", "guests", "rule", "leftover", "skip", "unskip")
 
 
 class Refused(Exception):
@@ -57,7 +57,8 @@ def load_plan(conn, week, settings):
 
 
 def read_plan(conn, week):
-    """The stored plan (slots, and `canteen` = {day: [user_id]}), None if the week has none. Never creates one."""
+    """The stored plan (slots, and `canteen` = {day: [user_id]}), None if the week has none. Never creates one.
+    A leftover slot (`leftover` = (day, meal) of its source, else None) has no recipe of its own: it gets the source's."""
     row = conn.execute("SELECT week, status, confirmed_at FROM plans WHERE week = ?", (week,)).fetchone()
     if row is None:
         return None
@@ -72,9 +73,11 @@ def read_plan(conn, week):
         {"day": r["day"], "meal": r["meal"], "active": bool(r["active"]), "recipe_id": r["recipe_id"],
          "eaters": slot_eaters.get((r["day"], r["meal"]), []), "guests": r["guests"],
          "locked": bool(r["locked"]), "skipped": bool(r["skipped"]), "rule": r["rule"],
+         "leftover": None if r["leftover_day"] is None else (r["leftover_day"], r["leftover_meal"]),
          "reason": json.loads(r["reason"]) if r["reason"] else None}
         for r in conn.execute("SELECT plan_slots.*, tags.name AS rule FROM plan_slots LEFT JOIN tags ON tags.id = rule_tag_id "
                               "WHERE week = ? ORDER BY day, meal = 'dinner'", (week,))]
+    plan["slots"] = planner.resolve_leftovers(plan["slots"])
     return plan
 
 
@@ -82,9 +85,11 @@ def _store(conn, week, slots):
     with conn:
         conn.executemany(
             "UPDATE plan_slots SET active = ?, recipe_id = ?, guests = ?, locked = ?, skipped = ?, reason = ?, "
-            "rule_tag_id = (SELECT id FROM tags WHERE name = ?) WHERE week = ? AND day = ? AND meal = ?",
-            [(int(s["active"]), s["recipe_id"], s["guests"], int(s["locked"]), int(s["skipped"]),
-              json.dumps(s["reason"]) if s["reason"] else None, s["rule"], week, s["day"], s["meal"]) for s in slots])
+            "rule_tag_id = (SELECT id FROM tags WHERE name = ?), leftover_day = ?, leftover_meal = ? "
+            "WHERE week = ? AND day = ? AND meal = ?",
+            [(int(s["active"]), None if s["leftover"] else s["recipe_id"], s["guests"], int(s["locked"]), int(s["skipped"]),
+              json.dumps(s["reason"]) if s["reason"] else None, s["rule"], *(s["leftover"] or (None, None)),
+              week, s["day"], s["meal"]) for s in slots])
         conn.execute("DELETE FROM slot_eaters WHERE week = ?", (week,))
         conn.executemany("INSERT INTO slot_eaters (week, day, meal, user_id) VALUES (?, ?, ?, ?)",
                          [(week, s["day"], s["meal"], u) for s in slots for u in s["eaters"]])
@@ -121,10 +126,11 @@ def view(conn, week, settings, today):
         "dates": [d.isoformat() for d in dates],
         "slots": [{"day": s["day"], "meal": s["meal"], "date": dates[s["day"]].isoformat(), "active": s["active"],
                    "recipe": info.get(s["recipe_id"]), "locked": s["locked"], "skipped": s["skipped"], "reason": s["reason"],
-                   "rule": s["rule"], "eaters": sorted(({"user_id": u, "display_name": names[u]} for u in s["eaters"]),
+                   "rule": s["rule"], "leftover": s["leftover"] and dict(zip(("day", "meal"), s["leftover"])),
+                   "eaters": sorted(({"user_id": u, "display_name": names[u]} for u in s["eaters"]),
                                     key=lambda p: (p["display_name"].casefold(), p["user_id"])),
                    "portions_by_user": {u: factors.get((u, s["day"]), 1.0) for u in s["eaters"]},
-                   "guests": s["guests"], "cooked_portions": planner.cooked_portions(s, factors)} for s in plan["slots"]],
+                   "guests": s["guests"], "cooked_portions": planner.cooked_portions(s, factors, plan["slots"])} for s in plan["slots"]],
         "totals": totals,
     }
 
@@ -149,8 +155,10 @@ def slot_action(conn, week, day, meal, body, settings, rng, today):
     plan = load_plan(conn, week, settings)
     slots = plan["slots"]
     slot = next(s for s in slots if s["day"] == day and s["meal"] == meal)
-    if action in ("reroll", "set", "clear") and (day, meal) in planner.protected(plan, today):
+    if action in ("reroll", "set", "clear", "leftover") and (day, meal) in planner.protected(plan, today):
         raise Refused(action)
+    if action in ("reroll", "set", "clear") and slot["leftover"]:
+        raise Refused(action)  # a leftover follows its source; use `leftover` null to unlink it
     if action == "reroll":
         if not slot["active"] or slot["locked"]:
             raise Refused(action)
@@ -170,6 +178,9 @@ def slot_action(conn, week, day, meal, body, settings, rng, today):
         slot.update(active=True, eaters=[u for u in participants(conn) if not (meal == "lunch" and u in plan["canteen"].get(day, ()))])
     elif action == "deactivate":
         slot.update(active=False, eaters=[], guests=0)
+        for other in slots:
+            if other["leftover"] == (day, meal):
+                other.update(leftover=None, recipe_id=None, reason=None)
     elif action == "eater":
         user_id, on = body.get("user_id"), body.get("on")
         if not isinstance(user_id, str) or conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
@@ -184,6 +195,22 @@ def slot_action(conn, week, day, meal, body, settings, rng, today):
         if not _int(n) or not 0 <= n <= MAX_GUESTS:
             raise db.InvalidField("n")
         slot["guests"] = n
+    elif action == "leftover":
+        from_day, from_meal = body.get("from_day"), body.get("from_meal")
+        if from_day is None and from_meal is None:
+            slot.update(leftover=None, recipe_id=None, reason=None, locked=False)
+        else:
+            if not _int(from_day) or not 0 <= from_day <= 6:
+                raise db.InvalidField("from_day")
+            if from_meal not in planner.MEALS:
+                raise db.InvalidField("from_meal")
+            source = next(s for s in slots if (s["day"], s["meal"]) == (from_day, from_meal))
+            if (planner.slot_order(source) >= planner.slot_order(slot) or not source["active"]
+                    or source["recipe_id"] is None or source["leftover"]):
+                raise db.InvalidField("from_day")
+            if not slot["active"] or any(s["leftover"] == (day, meal) for s in slots):  # a source cannot be a leftover itself
+                raise Refused(action)
+            slot.update(leftover=(from_day, from_meal), recipe_id=source["recipe_id"], reason=None, locked=False)
     elif action == "rule":
         tag_id = body.get("tag_id")
         row = conn.execute("SELECT name FROM tags WHERE id = ? AND category = 1", (tag_id,)).fetchone() if _int(tag_id) else None
@@ -226,12 +253,14 @@ RATE_MAX = 10
 
 def dated_slots(conn, days, confirmed_only=False):
     """Filled, active, non-skipped slots on the given dates (any plan status unless confirmed_only), oldest first:
-    [{date, meal, recipe_id, title, image, kcal, cooked_portions, portions_by_user}]. Never creates a plan."""
+    [{date, meal, recipe_id, title, image, kcal, cooked_portions, portions_by_user, leftover}]. Never creates a plan."""
     days = set(days)
     weeks = sorted({planner.week_of(d) for d in days})
     rows = conn.execute(
-        "SELECT s.week, s.day, s.meal, s.recipe_id, r.title, r.image, r.kcal FROM plan_slots s "
-        "JOIN plans p ON p.week = s.week JOIN recipes r ON r.id = s.recipe_id "
+        "SELECT s.week, s.day, s.meal, r.id AS recipe_id, r.title, r.image, r.kcal FROM plan_slots s "
+        "JOIN plans p ON p.week = s.week "
+        "LEFT JOIN plan_slots o ON o.week = s.week AND o.day = s.leftover_day AND o.meal = s.leftover_meal "  # o = source
+        "JOIN recipes r ON r.id = COALESCE(s.recipe_id, o.recipe_id) "
         f"WHERE s.week IN ({', '.join('?' * len(weeks))}) AND s.active = 1 AND s.skipped = 0"
         + (" AND p.status = 'confirmed'" if confirmed_only else ""), weeks).fetchall()
     stored = {w: read_plan(conn, w) for w in {r["week"] for r in rows}}
@@ -241,7 +270,8 @@ def dated_slots(conn, days, confirmed_only=False):
         s = next(s for s in stored[r["week"]]["slots"] if (s["day"], s["meal"]) == (r["day"], r["meal"]))
         slots.append({"date": planner.week_dates(r["week"])[r["day"]], "meal": r["meal"], "recipe_id": r["recipe_id"],
                       "title": r["title"], "image": r["image"], "kcal": r["kcal"],
-                      "cooked_portions": planner.cooked_portions(s, factors[r["week"]]),
+                      "cooked_portions": planner.cooked_portions(s, factors[r["week"]], stored[r["week"]]["slots"]),
+                      "leftover": s["leftover"] is not None,
                       "portions_by_user": {u: factors[r["week"]].get((u, r["day"]), 1.0) for u in s["eaters"]}})
     return sorted((s for s in slots if s["date"] in days), key=lambda s: (s["date"], planner.MEALS.index(s["meal"])))
 
@@ -253,11 +283,11 @@ def sensor_slots(conn, today):
 
 def rate_list(conn, user_id, today):
     """[{recipe_id, title, date, meal}]: meals of the RATE_DAYS days before today (confirmed plans) whose recipe the
-    user has not rated; newest first, one entry per recipe, at most RATE_MAX."""
+    user has not rated (a leftover adds no entry); newest first, one entry per recipe, at most RATE_MAX."""
     rated = {r["recipe_id"] for r in conn.execute("SELECT recipe_id FROM ratings WHERE user_id = ?", (user_id,))}
     out, seen = [], set()
     for s in reversed(dated_slots(conn, [today - timedelta(days=n) for n in range(1, RATE_DAYS + 1)], True)):
-        if s["recipe_id"] not in rated | seen:
+        if not s["leftover"] and s["recipe_id"] not in rated | seen:
             seen.add(s["recipe_id"])
             out.append({"recipe_id": s["recipe_id"], "title": s["title"], "date": s["date"].isoformat(), "meal": s["meal"]})
     return out[:RATE_MAX]
@@ -265,13 +295,15 @@ def rate_list(conn, user_id, today):
 
 def today_view(conn, user_id, today):
     """GET api/today: today's and tomorrow's meals (null = nothing planned), each with the user's own portion and kcal
-    (null when they do not eat it), `my_canteen` per day, and the "Wie war's?" list."""
+    (null when they do not eat it; `leftover: true` on a leftover meal, which cooks nothing), `my_canteen` per day, and the
+    "Wie war's?" list."""
     slots = dated_slots(conn, [today, today + timedelta(days=1)])
     canteen = {(r["week"], r["day"]) for r in conn.execute("SELECT week, day FROM plan_canteen WHERE user_id = ?", (user_id,))}
 
     def meal_of(s):
         portion = s["portions_by_user"].get(user_id)
-        return {**{k: s[k] for k in ("recipe_id", "title", "image", "cooked_portions")}, "my_portion": portion,
+        return {**{k: s[k] for k in ("recipe_id", "title", "image", "cooked_portions")},
+                **({"leftover": True} if s["leftover"] else {}), "my_portion": portion,
                 "my_kcal": int(portion * s["kcal"] + 0.5) if portion is not None and s["kcal"] else None}
 
     def day(d):

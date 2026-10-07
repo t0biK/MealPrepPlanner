@@ -149,6 +149,23 @@ class DbTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_migration_10_on_a_db_at_version_9(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.connect(tmp)
+            try:
+                for n, script in enumerate(db.MIGRATIONS[:9], start=1):  # the database as shipped with M13
+                    conn.executescript(f"BEGIN; {script} PRAGMA user_version = {n}; COMMIT;")
+                with conn:
+                    conn.execute("INSERT INTO plans (week, status) VALUES ('2026-W41', 'draft')")
+                    conn.execute("INSERT INTO plan_slots (week, day, meal, active, recipe_id) VALUES ('2026-W41', 0, 'dinner', 1, NULL)")
+                db.migrate(conn)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], len(db.MIGRATIONS))
+                row = conn.execute("SELECT leftover_day, leftover_meal, active FROM plan_slots").fetchone()
+                self.assertEqual(tuple(row), (None, None, 1))  # existing slots are no leftovers
+                conn.execute("UPDATE plan_slots SET leftover_day = 0, leftover_meal = 'dinner'")
+            finally:
+                conn.close()
+
     def test_slot_rules_setting(self):
         ids = {r["name"]: r["id"] for r in self.conn.execute("SELECT id, name FROM tags")}
         rules = [ids["Schnell"] if i in (1, 3) else ids["Leicht"] if i == 5 else None for i in range(14)]

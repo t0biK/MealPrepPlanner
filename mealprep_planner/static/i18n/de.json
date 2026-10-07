@@ -244,5 +244,8 @@
   "settings.slot_rules": "Kategorie pro Mahlzeit",
   "settings.slot_rules_hint": "Optional: Die Mahlzeit bekommt bevorzugt Rezepte dieser Kategorie, z. B. Mo–Fr Abend = Schnell. Gibt es keins, wird ein beliebiges Rezept genommen.",
   "plan.rule": "Kategorie",
-  "plan.rule_unmet": "Kategorie nicht erfüllt"
+  "plan.rule_unmet": "Kategorie nicht erfüllt",
+  "plan.leftover": "Reste von …",
+  "plan.leftover_of": "Reste von {slot}",
+  "today.leftover": "Reste"
 }

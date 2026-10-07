@@ -255,6 +255,25 @@ class DevServerTest(unittest.TestCase):
         self.assertEqual(post("slots/0/lunch", {"action": "skip"})[0], 400)  # future week
         self.assertEqual(post("slots/5/lunch", {"action": "set", "recipe_id": nutri})[0], 200)  # editing stays allowed
 
+    def test_plan_leftover_action(self):
+        week = "2030-W12"
+        mk = lambda title: self.call("POST", "/api/recipes", {"format_version": 1, "title": title, "servings": 2})[1]["id"]
+        stew, rice = mk("Left Stew"), mk("Left Rice")
+        post = lambda path, body=None: self.call("POST", f"/api/plans/{week}/{path}", body)
+        self.assertEqual(post("slots/1/lunch", {"action": "leftover", "from_day": 0, "from_meal": "dinner"})[1]["field"], "from_day")  # empty
+        post("slots/0/dinner", {"action": "set", "recipe_id": stew})
+        plan = post("slots/1/lunch", {"action": "leftover", "from_day": 0, "from_meal": "dinner"})[1]
+        slot = self.plan_slot(plan, 1, "lunch")
+        self.assertEqual((slot["leftover"], slot["recipe"]["title"], slot["reason"], slot["cooked_portions"]),
+                         ({"day": 0, "meal": "dinner"}, "Left Stew", None, 0))
+        self.assertEqual((self.plan_slot(plan, 0, "dinner")["cooked_portions"], self.plan_slot(plan, 0, "dinner")["leftover"]), (2, None))
+        self.assertEqual(self.plan_slot(post("slots/0/dinner", {"action": "set", "recipe_id": rice})[1], 1, "lunch")["recipe"]["id"], rice)
+        self.assertEqual(post("slots/1/lunch", {"action": "reroll"}), (400, {"error": "bad_request"}))
+        self.assertEqual(post("slots/1/lunch", {"action": "leftover", "from_day": 1, "from_meal": "lunch"})[1]["field"], "from_day")
+        self.assertEqual(post("slots/1/lunch", {"action": "leftover", "from_day": 0, "from_meal": "brunch"})[1]["field"], "from_meal")
+        slot = self.plan_slot(post("slots/1/lunch", {"action": "leftover", "from_day": None, "from_meal": None})[1], 1, "lunch")
+        self.assertEqual((slot["leftover"], slot["recipe"]), (None, None))
+
     def test_plan_past_slots_of_a_confirmed_plan_and_locked_slots_are_protected(self):
         week = "2020-W11"
         mk = lambda title: self.call("POST", "/api/recipes", {"format_version": 1, "title": title, "servings": 2})[1]["id"]

@@ -46,7 +46,7 @@ def build_list(conn, week):
     plan = plans.read_plan(conn, week)
     slots = {(s["day"], s["meal"]): s for s in plan["slots"]} if plan else {}
     factors = plans.week_portions(conn, plan) if plan else {}
-    cooked = {key: planner.cooked_portions(s, factors) for key, s in slots.items()}
+    cooked = {key: planner.cooked_portions(s, factors, plan["slots"]) for key, s in slots.items()}
     items = ingredients.aggregate(
         (r["name"], ingredients.scale(r["amount"], cooked[r["day"], r["meal"]] / r["servings"]), r["unit"])
         for r in conn.execute(SLOTS_SQL + " ORDER BY s.day, s.meal = 'dinner', i.pos", (week,)) if cooked[r["day"], r["meal"]])

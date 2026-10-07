@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 
-from mealprep import db, plans, planner
+from mealprep import db, plans, planner, shopping
 
 WEEK = "2026-W41"  # Monday 2026-10-05
 MONDAY = date(2026, 10, 5)
@@ -491,6 +491,265 @@ class PlanRulesTest(unittest.TestCase):
         self.assertEqual(self.settings["slot_rules"], [None] * 14)
         self.assertEqual([s["rule"] for s in self.slots().values() if s["rule"]], ["Leicht"])
         self.assertEqual(self.slots("2026-W42")[(1, "dinner")]["rule"], None)  # a new week gets no stale rule
+
+
+class LeftoverTest(unittest.TestCase):
+    """M14: leftover slots in the pure planner."""
+    PEOPLE = {u: {"kcal_target": t, "protein_target_g": None, "canteen_kcal": 700} for u, t in (("a", 1300), ("b", None))}
+
+    def plan(self, locked=True):
+        """Monday dinner = the source (recipe 1), Tuesday lunch = Reste von it, Tuesday dinner empty."""
+        return make_plan({(0, "dinner"), (1, "lunch"), (1, "dinner")}, {
+            (0, "dinner"): {"recipe_id": 1, "locked": locked, "eaters": ["a", "b"]},
+            (1, "lunch"): {"leftover": (0, "dinner"), "eaters": ["a"], "guests": 1},
+            (1, "dinner"): {"eaters": ["a"]}})
+
+    def test_a_leftover_slot_gets_the_recipe_of_its_source(self):
+        plan = self.plan()
+        out = planner.resolve_leftovers(plan["slots"])
+        self.assertEqual((slot(out, 1, "lunch")["recipe_id"], slot(out, 0, "dinner")["recipe_id"]), (1, 1))
+        self.assertIsNone(slot(plan["slots"], 1, "lunch")["recipe_id"])  # the input is not changed
+
+    def test_generate_skips_leftover_slots_and_counts_their_recipe_as_used(self):
+        out = gen(self.plan(), [recipe(1), recipe(2)], settings={"repeat_window_days": 14, "new_per_week": 0})
+        self.assertEqual(slot(out, 1, "dinner")["recipe_id"], 2)  # 1 is taken by the source and its leftover
+        lunch = slot(out, 1, "lunch")
+        self.assertEqual((lunch["leftover"], lunch["recipe_id"], lunch["reason"], lunch["eaters"], lunch["guests"]),
+                         ((0, "dinner"), 1, None, ["a"], 1))
+
+    def test_generate_with_an_unlocked_source_moves_the_leftover_along(self):
+        for seed in range(5):
+            out = gen(self.plan(locked=False), [recipe(1), recipe(2), recipe(3)], seed=seed)
+            self.assertEqual(slot(out, 1, "lunch")["recipe_id"], slot(out, 0, "dinner")["recipe_id"])
+            self.assertNotEqual(slot(out, 1, "dinner")["recipe_id"], slot(out, 0, "dinner")["recipe_id"])
+
+    def test_the_rule_of_a_leftover_slot_is_ignored(self):
+        plan = self.plan()
+        slot(plan["slots"], 1, "lunch")["rule"] = "Schnell"
+        out = gen(plan, [recipe(1), recipe(2, tags=["Schnell"])])
+        self.assertEqual((slot(out, 1, "lunch")["recipe_id"], slot(out, 1, "lunch")["reason"]), (1, None))
+
+    def test_reroll_of_the_source_moves_the_leftover_along_and_a_leftover_is_not_rerolled(self):
+        plan = self.plan(locked=False)
+        out = planner.reroll(plan, 0, "dinner", [recipe(1), recipe(2)], {}, USERS, [], SETTINGS, random.Random(1))
+        self.assertEqual((slot(out, 0, "dinner")["recipe_id"], slot(out, 1, "lunch")["recipe_id"]), (2, 2))
+        out = planner.reroll(plan, 1, "lunch", [recipe(1), recipe(2)], {}, USERS, [], SETTINGS, random.Random(1))
+        self.assertEqual((slot(out, 1, "lunch")["recipe_id"], slot(out, 1, "lunch")["reason"]), (1, None))
+
+    def test_cooked_portions_of_the_source_include_its_leftovers(self):
+        slots = self.plan()["slots"]
+        factors = {("a", 1): 1.5}
+        self.assertEqual(planner.cooked_portions(slot(slots, 0, "dinner"), factors), 2)  # without the slot list: as in M12
+        self.assertEqual(planner.cooked_portions(slot(slots, 0, "dinner"), factors, slots), 4.5)  # 2 + a's 1.5 + 1 guest
+        self.assertEqual(planner.cooked_portions(slot(slots, 1, "lunch"), factors, slots), 0)  # a leftover cooks nothing
+        slot(slots, 1, "lunch")["skipped"] = True  # not eaten
+        self.assertEqual(planner.cooked_portions(slot(slots, 0, "dinner"), factors, slots), 2)
+
+    def test_personal_factors_count_a_leftover_meal_with_the_kcal_of_its_source(self):
+        slots = planner.resolve_leftovers(self.plan()["slots"])
+        factors = planner.personal_factors(slots, {}, self.PEOPLE, {1: {"kcal": 800}})
+        self.assertEqual(factors, {("a", 0): 1.75, ("a", 1): 1.75})  # 1300 / 800 = 1.625 on both days
+        total = planner.person_day_totals(slots, {}, self.PEOPLE, {1: {"kcal": 800}})[1]["a"]
+        self.assertEqual(total["kcal"], 1400.0)
+
+
+class LeftoverPlanTest(unittest.TestCase):
+    """M14: the `leftover` slot action, portions, shopping, history, today page (plans.py on a real DB)."""
+    DINNER = (0, "dinner")  # the source used below; Tuesday lunch is the leftover
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(self.tmp.name)
+        db.migrate(self.conn)
+        for uid, name in (("a", "Anna"), ("b", "Ben")):
+            db.upsert_user(self.conn, {"id": uid, "name": uid, "display_name": name})
+        self.settings = db.get_settings(self.conn)
+        self.stew = self.recipe("Stew", 800, "Linsen", 200)
+        self.rice = self.recipe("Rice", 450, "Reis", 100)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def recipe(self, title, kcal, ingredient, grams):
+        with self.conn:
+            rid = self.conn.execute(
+                "INSERT INTO recipes (title, source_kind, servings, kcal, nutrition_source, created_at, updated_at) "
+                "VALUES (?, 'manual', 2, ?, 'manual', 'x', 'x')", (title, kcal)).lastrowid
+            self.conn.execute("INSERT INTO ingredients (recipe_id, pos, amount, unit, name) VALUES (?, 0, ?, 'g', ?)",
+                              (rid, grams, ingredient))
+        return rid
+
+    def slots(self, week=WEEK):
+        return {(s["day"], s["meal"]): s for s in plans.load_plan(self.conn, week, self.settings)["slots"]}
+
+    def act(self, day, meal, today=MONDAY, **body):
+        plans.slot_action(self.conn, WEEK, day, meal, body, self.settings, random.Random(1), today)
+        return self.slots()[(day, meal)]
+
+    def leftover(self, day=1, meal="lunch"):
+        """Monday dinner gets the stew; the given slot (default Tuesday lunch) becomes Reste von it."""
+        self.act(*self.DINNER, action="set", recipe_id=self.stew)
+        return self.act(day, meal, action="leftover", from_day=0, from_meal="dinner")
+
+    def invalid(self, field, day, meal, **body):
+        before = self.slots()
+        with self.assertRaises(db.InvalidField, msg=body) as cm:
+            self.act(day, meal, action="leftover", **body)
+        self.assertEqual(cm.exception.field, field)
+        self.assertEqual(self.slots(), before)
+
+    def test_a_leftover_shows_the_current_recipe_of_its_source_and_stores_none_of_its_own(self):
+        s = self.leftover()
+        self.assertEqual((s["leftover"], s["recipe_id"], s["reason"]), (self.DINNER, self.stew, None))
+        self.assertEqual(tuple(self.conn.execute("SELECT recipe_id, leftover_day, leftover_meal FROM plan_slots "
+                                                 "WHERE day = 1 AND meal = 'lunch'").fetchone()), (None, 0, "dinner"))
+        view = plans.view(self.conn, WEEK, self.settings, MONDAY)["slots"]
+        self.assertEqual((view[2]["leftover"], view[2]["recipe"]["title"], view[2]["cooked_portions"]),
+                         ({"day": 0, "meal": "dinner"}, "Stew", 0))
+        self.assertIsNone(view[1]["leftover"])
+
+    def test_the_leftover_follows_rerolls_sets_and_clears_of_its_source(self):
+        self.leftover()
+        self.assertEqual(self.act(*self.DINNER, action="reroll")["recipe_id"], self.rice)  # the only other recipe
+        self.assertEqual(self.slots()[1, "lunch"]["recipe_id"], self.rice)
+        self.act(*self.DINNER, action="set", recipe_id=self.stew)
+        self.assertEqual(self.slots()[1, "lunch"]["recipe_id"], self.stew)
+        self.act(*self.DINNER, action="clear")
+        self.assertEqual((self.slots()[1, "lunch"]["recipe_id"], self.slots()[1, "lunch"]["leftover"]), (None, self.DINNER))  # link stays
+        self.assertIsNone(plans.view(self.conn, WEEK, self.settings, MONDAY)["slots"][2]["recipe"])
+
+    def test_the_source_must_be_strictly_earlier_and_can_be_shared(self):
+        self.act(0, "lunch", action="set", recipe_id=self.rice)
+        self.assertEqual(self.act(0, "dinner", action="leftover", from_day=0, from_meal="lunch")["leftover"], (0, "lunch"))
+        self.assertEqual(self.act(6, "dinner", action="leftover", from_day=0, from_meal="lunch")["leftover"], (0, "lunch"))
+
+    def test_invalid_sources(self):
+        self.invalid("from_day", 1, "lunch", from_day=0, from_meal="dinner")  # empty source
+        self.act(0, "dinner", action="set", recipe_id=self.stew)
+        self.invalid("from_day", 0, "dinner", from_day=0, from_meal="dinner")  # itself
+        self.invalid("from_day", 0, "lunch", from_day=0, from_meal="dinner")  # later the same day
+        self.act(1, "lunch", action="set", recipe_id=self.rice)
+        self.invalid("from_day", 0, "dinner", from_day=1, from_meal="lunch")  # a later day
+        self.act(0, "lunch", action="set", recipe_id=self.rice)
+        self.act(0, "lunch", action="deactivate")  # inactive (keeps its recipe)
+        self.invalid("from_day", 1, "dinner", from_day=0, from_meal="lunch")
+        self.act(1, "lunch", action="leftover", from_day=0, from_meal="dinner")
+        self.act(2, "lunch", action="set", recipe_id=self.rice)
+        self.invalid("from_day", 2, "dinner", from_day=1, from_meal="lunch")  # a leftover of a leftover
+        for bad in (7, -1, "0", True, 1.0, None):
+            self.invalid("from_day", 2, "dinner", from_day=bad, from_meal="dinner")
+        for bad in ("brunch", None, 1, ["dinner"]):
+            self.invalid("from_meal", 2, "dinner", from_day=0, from_meal=bad)
+
+    def test_a_source_cannot_be_a_leftover_and_an_inactive_slot_cannot_be_one(self):
+        self.leftover()
+        self.act(0, "lunch", action="set", recipe_id=self.rice)
+        with self.assertRaises(plans.Refused):  # Monday dinner is the source of Tuesday lunch
+            self.act(0, "dinner", action="leftover", from_day=0, from_meal="lunch")
+        self.act(3, "lunch", action="deactivate")
+        with self.assertRaises(plans.Refused):
+            self.act(3, "lunch", action="leftover", from_day=0, from_meal="dinner")
+
+    def test_null_removes_the_link_and_empties_the_slot(self):
+        for body in ({"from_day": None, "from_meal": None}, {}):
+            self.leftover()
+            s = self.act(1, "lunch", action="leftover", **body)
+            self.assertEqual((s["leftover"], s["recipe_id"], s["reason"], s["locked"]), (None, None, None, False))
+            self.assertEqual(self.slots()[0, "dinner"]["recipe_id"], self.stew)  # the source is untouched
+
+    def test_a_leftover_can_get_another_source(self):
+        self.leftover()
+        self.act(0, "lunch", action="set", recipe_id=self.rice)
+        s = self.act(1, "lunch", action="leftover", from_day=0, from_meal="lunch")
+        self.assertEqual((s["leftover"], s["recipe_id"]), ((0, "lunch"), self.rice))
+
+    def test_reroll_set_and_clear_are_refused_on_a_leftover(self):
+        self.leftover()
+        for body in ({"action": "reroll"}, {"action": "set", "recipe_id": self.rice}, {"action": "clear"}):
+            with self.assertRaises(plans.Refused, msg=body):
+                self.act(1, "lunch", **body)
+        self.assertTrue(self.act(1, "lunch", action="lock")["locked"])  # harmless; linking again resets it
+        self.assertFalse(self.act(1, "lunch", action="leftover", from_day=0, from_meal="dinner")["locked"])
+
+    def test_past_slots_of_a_confirmed_plan_are_protected(self):
+        self.leftover()
+        plans.confirm(self.conn, WEEK, self.settings)
+        wednesday = MONDAY + timedelta(days=2)
+        with self.assertRaises(plans.Refused):  # Tuesday is past: cooked, no longer changeable
+            self.act(1, "lunch", today=wednesday, action="leftover", from_day=None, from_meal=None)
+        with self.assertRaises(plans.Refused):
+            self.act(1, "lunch", today=wednesday, action="leftover", from_day=0, from_meal="dinner")
+        s = self.act(3, "lunch", today=wednesday, action="leftover", from_day=0, from_meal="dinner")
+        self.assertEqual(s["leftover"], self.DINNER)
+
+    def test_deactivating_the_source_removes_its_links(self):
+        self.leftover()
+        self.leftover(3, "dinner")
+        self.act(*self.DINNER, action="deactivate")
+        for key in ((1, "lunch"), (3, "dinner")):
+            s = self.slots()[key]
+            self.assertEqual((s["leftover"], s["recipe_id"], s["active"]), (None, None, True))
+
+    def test_a_deactivated_leftover_keeps_its_link_but_cooks_nothing(self):
+        self.leftover()
+        self.act(1, "lunch", action="deactivate")
+        s = self.slots()
+        self.assertEqual((s[1, "lunch"]["leftover"], s[1, "lunch"]["eaters"]), (self.DINNER, []))
+        self.assertEqual(plans.view(self.conn, WEEK, self.settings, MONDAY)["slots"][1]["cooked_portions"], 2)  # the source's own eaters
+        plans.confirm(self.conn, WEEK, self.settings)
+        self.assertIsNone(plans.today_view(self.conn, "a", MONDAY + timedelta(days=1))["today"]["lunch"])
+
+    def test_generate_leaves_leftover_slots_alone_and_counts_the_recipe(self):
+        self.leftover()
+        self.act(*self.DINNER, action="lock")
+        plans.generate(self.conn, WEEK, self.settings, random.Random(1), MONDAY)
+        slots = self.slots()
+        lunch = slots[1, "lunch"]
+        self.assertEqual((lunch["leftover"], lunch["recipe_id"], lunch["reason"]), (self.DINNER, self.stew, None))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM plan_slots WHERE recipe_id = ?", (self.stew,)).fetchone()[0], 1)
+        self.assertEqual([k for k, s in slots.items() if s["recipe_id"] == self.rice and not s["leftover"]], [(0, "lunch")])
+        self.act(*self.DINNER, action="unlock")
+        plans.generate(self.conn, WEEK, self.settings, random.Random(2), MONDAY)  # the source may change: the leftover follows
+        slots = self.slots()
+        self.assertEqual(slots[1, "lunch"]["recipe_id"], slots[0, "dinner"]["recipe_id"])
+        self.assertEqual(slots[1, "lunch"]["leftover"], self.DINNER)
+
+    def test_cooked_portions_personal_factors_and_shopping(self):
+        db.set_household(self.conn, "a", {"kcal_target": 1300})  # b has no target
+        self.act(0, "lunch", action="set", recipe_id=self.rice)
+        self.leftover()
+        s = plans.view(self.conn, WEEK, self.settings, MONDAY)["slots"]  # 0 Mon lunch, 1 Mon dinner, 2 Tue lunch
+        self.assertEqual(s[2]["portions_by_user"], {"a": 1.75, "b": 1.0})  # Tuesday: 1300 / 800 kcal of the stew
+        self.assertEqual((s[1]["portions_by_user"]["a"], s[1]["cooked_portions"]), (1.0, 4.75))  # 1300 / 1250; 1 + 1 + (1.75 + 1)
+        self.assertEqual(s[0]["cooked_portions"], 2.0)
+        amounts = {k: i["amounts"] for k, i in shopping.build_list(self.conn, WEEK).items()}
+        self.assertEqual(amounts, {"linsen": {"g": 475.0}, "reis": {"g": 100.0}})  # the leftover adds nothing of its own
+        self.assertEqual(plans.view(self.conn, WEEK, self.settings, MONDAY)["totals"][1]["kcal"], 800.0)  # but it is a meal of the day
+        plans.confirm(self.conn, WEEK, self.settings)
+        self.act(1, "lunch", today=MONDAY + timedelta(days=1), action="skip")  # not eaten: the source needs no extra portions
+        self.assertEqual(plans.view(self.conn, WEEK, self.settings, MONDAY)["slots"][1]["cooked_portions"], 2.0)
+
+    def test_a_leftover_adds_no_history_and_no_rate_entry(self):
+        self.leftover()
+        plans.confirm(self.conn, WEEK, self.settings)
+        self.assertEqual(planner.history(self.conn, "2026-W42"), [(self.stew, MONDAY)])
+        wednesday = MONDAY + timedelta(days=2)
+        self.assertEqual([(x["title"], x["date"], x["meal"]) for x in plans.rate_list(self.conn, "a", wednesday)],
+                         [("Stew", "2026-10-05", "dinner")])  # not Tuesday's lunch
+
+    def test_the_today_page_and_the_sensor_show_the_recipe_of_a_leftover(self):
+        self.leftover()
+        plans.confirm(self.conn, WEEK, self.settings)
+        tuesday = MONDAY + timedelta(days=1)
+        day = plans.today_view(self.conn, "a", tuesday)["today"]
+        self.assertEqual({k: day["lunch"][k] for k in ("title", "cooked_portions", "leftover", "my_portion")}, {
+            "title": "Stew", "cooked_portions": 0, "leftover": True, "my_portion": 1.0})
+        self.assertIsNone(day["dinner"])
+        monday = plans.today_view(self.conn, "a", MONDAY)["today"]["dinner"]
+        self.assertEqual((monday["cooked_portions"], "leftover" in monday), (4, False))  # 2 eaters + the leftover's 2
+        self.assertEqual([(s["date"], s["meal"], s["title"]) for s in plans.sensor_slots(self.conn, tuesday)],
+                         [(MONDAY, "dinner", "Stew"), (tuesday, "lunch", "Stew")])
 
 
 if __name__ == "__main__":

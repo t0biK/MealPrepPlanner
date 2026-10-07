@@ -861,6 +861,9 @@ async function pageWeek(app, week) {
     }
   };
   const slotAct = (s, body) => act(`slots/${s.day}/${s.meal}`, body);
+  const slotLabel = (x) => t("plan.slot_label", {
+    day: parseDate(plan.dates[x.day]).toLocaleDateString(document.documentElement.lang, { weekday: "short" }),
+    meal: t(x.meal === "lunch" ? "form.lunch" : "form.dinner") });
   const icon = (text, label, onclick) => {
     const b = el("button", { type: "button", className: "secondary icon", textContent: text, ariaLabel: label, title: label });
     b.onclick = onclick;
@@ -893,20 +896,33 @@ async function pageWeek(app, week) {
     ruleSel.onchange = () => slotAct(s, { action: "rule", tag_id: ruleSel.value ? Number(ruleSel.value) : null });
     const skip = el("input", { type: "checkbox", checked: s.skipped });
     skip.onchange = () => slotAct(s, { action: skip.checked ? "skip" : "unskip" });
+    // "Reste von …": any earlier active filled slot that is not a leftover itself (a source cannot be a leftover)
+    const isSource = plan.slots.some((x) => x.leftover?.day === s.day && x.leftover?.meal === s.meal);
+    const sources = plan.slots.filter((x) => x.active && x.recipe && !x.leftover
+      && (x.day < s.day || (x.day === s.day && x.meal === "lunch" && s.meal === "dinner")));
+    const leftoverSel = el("select", { ariaLabel: t("plan.leftover") }, option("", t("settings.none"), !s.leftover),
+      ...sources.map((x) => option(`${x.day}-${x.meal}`, slotLabel(x), x.day === s.leftover?.day && x.meal === s.leftover?.meal)));
+    leftoverSel.onchange = () => {
+      const [day, from] = leftoverSel.value.split("-");
+      slotAct(s, { action: "leftover", from_day: from ? Number(day) : null, from_meal: from ?? null });
+    };
     return el("div", { className: "slot" + (s.skipped ? " skipped" : "") },
-      el("div", { className: "row" }, meal, el("span", { className: "muted", textContent: t("plan.cooked", { n: fmtPortion(s.cooked_portions) }) })),
+      el("div", { className: "row" }, meal, el("span", { className: "muted",
+        textContent: s.leftover ? t("plan.leftover_of", { slot: slotLabel(s.leftover) }) : t("plan.cooked", { n: fmtPortion(s.cooked_portions) }) })),
       chips,
       el("div", { className: "row" }, el("span", { className: "muted", textContent: t("plan.guests") }),
         el("div", { className: "stepper", role: "group", ariaLabel: t("plan.guests") }, minus, el("strong", { textContent: s.guests }), plus)),
       ...(s.recipe ? [...image(s.recipe.image), el("a", { href: "#/rezepte/" + s.recipe.id, textContent: s.recipe.title })]
         : [el("span", { className: "muted", textContent: t("plan.empty_slot") })]),
-      el("p", { className: "muted", textContent: reasonText(s.reason, s.rule) }),
-      el("label", { className: "row" }, el("span", { className: "muted", textContent: t("plan.rule") }), ruleSel),
+      ...(s.leftover ? [] : [el("p", { className: "muted", textContent: reasonText(s.reason, s.rule) }),
+        el("label", { className: "row" }, el("span", { className: "muted", textContent: t("plan.rule") }), ruleSel)]),
+      ...(past || isSource || !(sources.length || s.leftover) ? []
+        : [el("label", { className: "row" }, el("span", { className: "muted", textContent: t("plan.leftover") }), leftoverSel)]),
       ...(needsKcal ? [el("p", {}, el("a", { href: `#/rezepte/${s.recipe.id}/bearbeiten`, textContent: t("form.estimate") }))] : []),
       el("div", { className: "actions" },
-        ...(s.locked || past ? [] : [icon("🎲", t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
-        ...(past ? [] : [icon("✏️", t("plan.replace"), () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id })))]),
-        ...(s.recipe ? [icon(s.locked ? "🔓" : "🔒", t(s.locked ? "plan.unlock" : "plan.lock"),
+        ...(s.leftover || s.locked || past ? [] : [icon("🎲", t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
+        ...(s.leftover || past ? [] : [icon("✏️", t("plan.replace"), () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id })))]),
+        ...(s.recipe && !s.leftover ? [icon(s.locked ? "🔓" : "🔒", t(s.locked ? "plan.unlock" : "plan.lock"),
           () => slotAct(s, { action: s.locked ? "unlock" : "lock" }))] : []),
         icon("⏸", t("plan.deactivate"), () => slotAct(s, { action: "deactivate" }))),
       ...(plan.status === "confirmed" && s.date <= plan.today ? [el("label", { className: "row" }, t("plan.skipped"), skip)] : []));
@@ -975,8 +991,8 @@ async function pageToday(app) {
     { weekday: "long", day: "numeric", month: "numeric" });
   const mealRow = (meal, s) => el("div", { className: "row" },
     el("strong", { textContent: t(meal === "lunch" ? "form.lunch" : "form.dinner") }),
-    s ? el("span", {}, el("a", { href: recipeHref(s.recipe_id, s.cooked_portions), textContent: s.title }), " ",
-      el("span", { className: "muted", textContent: t("today.portions", { n: fmtPortion(s.cooked_portions) }) }))
+    s ? el("span", {}, el("a", { href: recipeHref(s.recipe_id, s.leftover ? "" : s.cooked_portions), textContent: s.title }), " ",
+      el("span", { className: "muted", textContent: s.leftover ? t("today.leftover") : t("today.portions", { n: fmtPortion(s.cooked_portions) }) }))
       : el("span", { className: "muted", textContent: "–" }));
   // "Deine Portion: 1¼ (≈ 780 kcal)", or "Kantine" for a canteen lunch
   const mine = (s, canteen) => {

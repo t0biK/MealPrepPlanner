@@ -2,7 +2,8 @@
 
 ratings: {user_id: {recipe_id: stars 0-5}}   tags: {recipe_id: [tag names]}   users: [user_id]
 recipes: [{id, for_lunch, for_dinner, archived, tags, kcal}]   history: [(recipe_id, date)]
-slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason, rule (category tag name | None)}   plan: {week, slots: [slot x 14], canteen}
+slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason, rule (category tag name | None), leftover ((day, meal) of the source | None)}   plan: {week, slots: [slot x 14], canteen}
+M14: a leftover slot has no recipe of its own; its recipe_id is its source's (resolve_leftovers), so every function below sees what is eaten.
 M12: people: {user_id: {kcal_target, protein_target_g, canteen_kcal}}   canteen: {day: [user_id]}   nutrition: {recipe_id: {kcal, ...} | None}
 dated slot (sensor_payload): {date, meal, title}
 """
@@ -153,8 +154,16 @@ def _pick(pool, model, rng, misfit):
     return rng.choices(pool, [math.exp((s - best) / TEMPERATURE) for s in scores])[0]
 
 
+def resolve_leftovers(slots):
+    """Copies of the slots in which every leftover slot has the recipe of its source (the source is never a leftover)."""
+    by_key = {(s["day"], s["meal"]): s for s in slots}
+    return [{**s, "recipe_id": by_key[s["leftover"]]["recipe_id"]} if s.get("leftover") else dict(s) for s in slots]
+
+
 def _used(slots, skip=()):
-    return {s["recipe_id"] for s in slots if s["active"] and s["recipe_id"] is not None and (s["day"], s["meal"]) not in skip}
+    """Recipes of the active filled slots; a leftover slot adds nothing of its own (its source is counted)."""
+    return {s["recipe_id"] for s in slots if s["active"] and s["recipe_id"] is not None and not s.get("leftover")
+            and (s["day"], s["meal"]) not in skip}
 
 
 def protected(plan, today):
@@ -171,15 +180,15 @@ def _fill(slot, pool, slots, plan, kcal, model, cooked, rng, people):
 
 
 def generate(plan, recipes, ratings, users, history, settings, rng, today, people=None):
-    """Fill all active, unlocked, non-skipped slots (Monday to Sunday, lunch first); returns the new slot list.
-    Past slots of a confirmed plan stay as they are but still count as used."""
-    slots = [dict(s) for s in plan["slots"]]
+    """Fill all active, unlocked, non-skipped, non-leftover slots (Monday to Sunday, lunch first); returns the new slot list.
+    Past slots of a confirmed plan stay as they are but still count as used; leftover slots follow their source."""
+    slots = resolve_leftovers(plan["slots"])
     dates = week_dates(plan["week"])
     model = build_model(users, ratings, {r["id"]: r["tags"] for r in recipes})
     kcal = {r["id"]: r.get("kcal") for r in recipes}
     cooked = {rid for rid, _ in history}
     past = protected(plan, today)
-    todo = sorted((s for s in slots if s["active"] and not s["locked"] and not s["skipped"]
+    todo = sorted((s for s in slots if s["active"] and not s["locked"] and not s["skipped"] and not s.get("leftover")
                    and (s["day"], s["meal"]) not in past), key=slot_order)
     used = _used(slots, {(s["day"], s["meal"]) for s in todo})
     wants_new = set(rng.sample(range(len(todo)), min(settings["new_per_week"], len(todo))))
@@ -193,20 +202,23 @@ def generate(plan, recipes, ratings, users, history, settings, rng, today, peopl
             continue
         _fill(slot, pool, slots, plan, kcal, model, cooked, rng, people or {})
         used.add(slot["recipe_id"])
-    return slots
+    return resolve_leftovers(slots)
 
 
 def reroll(plan, day, meal, recipes, ratings, users, history, settings, rng, people=None):
-    """Same rules for one slot, excluding its current recipe; without an alternative the slot is unchanged."""
-    slots = [dict(s) for s in plan["slots"]]
+    """Same rules for one slot, excluding its current recipe; without an alternative (or on a leftover slot) the slot is
+    unchanged. Leftover slots follow the new recipe."""
+    slots = resolve_leftovers(plan["slots"])
     slot = next(s for s in slots if s["day"] == day and s["meal"] == meal)
+    if slot.get("leftover"):
+        return slots
     model = build_model(users, ratings, {r["id"]: r["tags"] for r in recipes})
     pool = _candidates(slot, week_dates(plan["week"]), recipes, model, history,
                        _used(slots, {(day, meal)}) | {slot["recipe_id"]}, settings["repeat_window_days"])
     if pool:
         _fill(slot, pool, slots, plan, {r["id"]: r.get("kcal") for r in recipes}, model, {rid for rid, _ in history}, rng,
               people or {})
-    return slots
+    return resolve_leftovers(slots)
 
 
 NUTRIENTS = ("kcal", "protein_g", "fat_g", "carbs_g")
@@ -274,9 +286,13 @@ def personal_factors(slots, canteen, people, nutrition):
     return out
 
 
-def cooked_portions(slot, factors):
-    """Portions to cook for a slot: its eaters' personal factors plus the guests."""
-    return sum(factors.get((u, slot["day"]), 1.0) for u in slot["eaters"]) + slot["guests"]
+def cooked_portions(slot, factors, slots=()):
+    """Portions to cook for a slot: its eaters' personal factors plus the guests, plus the same for every slot of `slots`
+    marked "Reste von" it (not skipped). A leftover slot itself cooks nothing."""
+    if slot.get("leftover"):
+        return 0
+    eating = [slot, *(t for t in slots if t.get("leftover") == (slot["day"], slot["meal"]) and not t["skipped"])]
+    return sum(sum(factors.get((u, t["day"]), 1.0) for u in t["eaters"]) + t["guests"] for t in eating)
 
 
 def person_day_totals(slots, canteen, people, nutrition):

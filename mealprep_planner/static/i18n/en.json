@@ -244,5 +244,8 @@
   "settings.slot_rules": "Category per meal",
   "settings.slot_rules_hint": "Optional: the meal prefers recipes of this category, e.g. Mon–Fri dinner = Schnell. If there is none, any recipe is used.",
   "plan.rule": "Category",
-  "plan.rule_unmet": "Category not met"
+  "plan.rule_unmet": "Category not met",
+  "plan.leftover": "Leftovers from …",
+  "plan.leftover_of": "Leftovers from {slot}",
+  "today.leftover": "Leftovers"
 }

@@ -163,6 +163,10 @@ MIGRATIONS = [
       ('Schnell', 'Meal Prep', 'Sonntagsessen', 'Leicht', 'Proteinreich', 'Lunchbox', 'Ofengericht', 'Gäste');
     ALTER TABLE plan_slots ADD COLUMN rule_tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL;
     """,
+    """
+    ALTER TABLE plan_slots ADD COLUMN leftover_day INTEGER;
+    ALTER TABLE plan_slots ADD COLUMN leftover_meal TEXT;
+    """,
 ]
 
 DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None,
