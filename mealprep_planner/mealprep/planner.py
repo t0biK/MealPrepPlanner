@@ -1,8 +1,9 @@
 """Taste prediction (M6) and week planning (M7): pure functions on plain data (history() is the only DB read).
 
 ratings: {user_id: {recipe_id: stars 0-5}}   tags: {recipe_id: [tag names]}   users: [user_id]
-recipes: [{id, for_lunch, for_dinner, archived, tags}]   history: [(recipe_id, date)]
-slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason}   plan: {week, slots: [slot x 14]}
+recipes: [{id, for_lunch, for_dinner, archived, tags, kcal}]   history: [(recipe_id, date)]
+slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason}   plan: {week, slots: [slot x 14], canteen}
+M12: people: {user_id: {kcal_target, protein_target_g, canteen_kcal}}   canteen: {day: [user_id]}   nutrition: {recipe_id: {kcal, ...} | None}
 dated slot (sensor_payload): {date, meal, title}
 """
 import math
@@ -122,10 +123,11 @@ def top_tags(model, recipe_id, n=3):
     return sorted(model["tags"].get(recipe_id, ()), key=lambda t: (-affinity(t), t))[:n]
 
 
-def _reason(model, recipe_id, cooked):
-    """Suggestion reason (section 6): rated, predicted (cooked before) or new."""
+def _reason(model, recipe_id, cooked, fit_label=None):
+    """Suggestion reason (section 6): rated, predicted (cooked before) or new; `fit` only when an eater has a target."""
     kind = "rated" if _is_rated(model, recipe_id) else "predicted" if recipe_id in cooked else "new"
-    return {"kind": kind, "score": round(household_score(model, recipe_id)[0], 1), "tags": top_tags(model, recipe_id)}
+    return {"kind": kind, "score": round(household_score(model, recipe_id)[0], 1), "tags": top_tags(model, recipe_id),
+            **({"fit": fit_label} if fit_label else {})}
 
 
 def _candidates(slot, dates, recipes, model, history, used, window):
@@ -137,8 +139,9 @@ def _candidates(slot, dates, recipes, model, history, used, window):
                   and r["id"] not in recent and not is_vetoed(model, r["id"]))
 
 
-def _pick(pool, model, rng):
-    scores = [household_score(model, rid)[0] for rid in pool]
+def _pick(pool, model, rng, misfit):
+    """Weighted random pick; the score of a recipe is lowered by its calorie misfit share (M12)."""
+    scores = [household_score(model, rid)[0] - misfit[rid] for rid in pool]
     best = max(scores)
     return rng.choices(pool, [math.exp((s - best) / TEMPERATURE) for s in scores])[0]
 
@@ -153,12 +156,20 @@ def protected(plan, today):
     return {(s["day"], s["meal"]) for s in plan["slots"] if dates[s["day"]] < today} if plan["status"] == "confirmed" else set()
 
 
-def generate(plan, recipes, ratings, users, history, settings, rng, today):
+def _fill(slot, pool, slots, plan, kcal, model, cooked, rng, people):
+    """Pick a recipe of the pool for the slot, weighted by score minus the calorie misfit; sets recipe_id and reason."""
+    fits = {rid: fit(slots, slot, kcal.get(rid), people, plan.get("canteen", {})) for rid in pool}
+    slot["recipe_id"] = _pick(pool, model, rng, {rid: f[1] for rid, f in fits.items()})
+    slot["reason"] = _reason(model, slot["recipe_id"], cooked, fits[slot["recipe_id"]][0])
+
+
+def generate(plan, recipes, ratings, users, history, settings, rng, today, people=None):
     """Fill all active, unlocked, non-skipped slots (Monday to Sunday, lunch first); returns the new slot list.
     Past slots of a confirmed plan stay as they are but still count as used."""
     slots = [dict(s) for s in plan["slots"]]
     dates = week_dates(plan["week"])
     model = build_model(users, ratings, {r["id"]: r["tags"] for r in recipes})
+    kcal = {r["id"]: r.get("kcal") for r in recipes}
     cooked = {rid for rid, _ in history}
     past = protected(plan, today)
     todo = sorted((s for s in slots if s["active"] and not s["locked"] and not s["skipped"]
@@ -173,13 +184,12 @@ def generate(plan, recipes, ratings, users, history, settings, rng, today):
         if not pool:
             slot.update(recipe_id=None, reason={"kind": "none"})
             continue
-        slot["recipe_id"] = _pick(pool, model, rng)
-        slot["reason"] = _reason(model, slot["recipe_id"], cooked)
+        _fill(slot, pool, slots, plan, kcal, model, cooked, rng, people or {})
         used.add(slot["recipe_id"])
     return slots
 
 
-def reroll(plan, day, meal, recipes, ratings, users, history, settings, rng):
+def reroll(plan, day, meal, recipes, ratings, users, history, settings, rng, people=None):
     """Same rules for one slot, excluding its current recipe; without an alternative the slot is unchanged."""
     slots = [dict(s) for s in plan["slots"]]
     slot = next(s for s in slots if s["day"] == day and s["meal"] == meal)
@@ -187,8 +197,8 @@ def reroll(plan, day, meal, recipes, ratings, users, history, settings, rng):
     pool = _candidates(slot, week_dates(plan["week"]), recipes, model, history,
                        _used(slots, {(day, meal)}) | {slot["recipe_id"]}, settings["repeat_window_days"])
     if pool:
-        slot["recipe_id"] = _pick(pool, model, rng)
-        slot["reason"] = _reason(model, slot["recipe_id"], {rid for rid, _ in history})
+        _fill(slot, pool, slots, plan, {r["id"]: r.get("kcal") for r in recipes}, model, {rid for rid, _ in history}, rng,
+              people or {})
     return slots
 
 
@@ -214,6 +224,94 @@ def day_totals(slots, nutrition):
         for key in NUTRIENTS:
             total[key] = round(total[key], 1)
     return totals
+
+
+# ---- personal portions (M12) ----
+
+STEP, MIN_FACTOR, MAX_FACTOR = 0.25, 0.5, 2.0
+FIT_RANGE = (0.75, 1.5)  # a recipe fits when (per-meal calorie budget) / (its kcal) lies in this range
+
+
+def _kcal(nutrition, recipe_id):
+    """kcal per portion, None when the recipe has none (0 counts as none)."""
+    return (nutrition.get(recipe_id) or {}).get("kcal") or None
+
+
+def _canteen_kcal(canteen, people, user, day):
+    return people[user]["canteen_kcal"] if user in canteen.get(day, ()) else 0
+
+
+def _meals(slots, day, user):
+    """Recipe ids of the active, non-skipped, filled slots of the day the person eats."""
+    return [s["recipe_id"] for s in slots if s["day"] == day and s["active"] and not s["skipped"]
+            and s["recipe_id"] is not None and user in s["eaters"]]
+
+
+def round_step(x):
+    """Nearest multiple of STEP, halves up (not the banker's rounding of round())."""
+    return math.floor(x / STEP + 0.5) * STEP
+
+
+def personal_factors(slots, canteen, people, nutrition):
+    """{(user_id, day): portion factor} for every eater with a kcal target whose meals of the day all have kcal:
+    (target - canteen kcal) / sum of the meals' kcal, rounded to STEP and limited to MIN_FACTOR..MAX_FACTOR.
+    Anyone else (no target, no meals, a meal without kcal) is missing = factor 1."""
+    out = {}
+    for user in {u for s in slots for u in s["eaters"]}:
+        target = people.get(user, {}).get("kcal_target")
+        for day in range(7):
+            kcals = [_kcal(nutrition, r) for r in _meals(slots, day, user)]
+            if target and kcals and all(kcals):
+                budget = target - _canteen_kcal(canteen, people, user, day)
+                out[user, day] = min(MAX_FACTOR, max(MIN_FACTOR, round_step(budget / sum(kcals))))
+    return out
+
+
+def cooked_portions(slot, factors):
+    """Portions to cook for a slot: its eaters' personal factors plus the guests."""
+    return sum(factors.get((u, slot["day"]), 1.0) for u in slot["eaters"]) + slot["guests"]
+
+
+def person_day_totals(slots, canteen, people, nutrition):
+    """Per day (0-6) {user_id: {kcal, kcal_target, protein_g, protein_target, canteen, incomplete}} for every person with a
+    target who eats or is at the canteen that day. kcal = canteen kcal + factor * kcal of their meals; incomplete = a
+    meal has no kcal (then the factor is 1). Canteen protein is unknown and not counted."""
+    factors = personal_factors(slots, canteen, people, nutrition)
+    days = [{} for _ in range(7)]
+    for user, p in people.items():
+        if not (p["kcal_target"] or p["protein_target_g"]):
+            continue
+        for day in range(7):
+            meals, at_canteen = _meals(slots, day, user), user in canteen.get(day, ())
+            if not meals and not at_canteen:
+                continue
+            f = factors.get((user, day), 1.0)
+            days[day][user] = {
+                "kcal": round(_canteen_kcal(canteen, people, user, day) + f * sum(_kcal(nutrition, r) or 0 for r in meals), 1),
+                "kcal_target": p["kcal_target"],
+                "protein_g": round(f * sum((nutrition.get(r) or {}).get("protein_g") or 0 for r in meals), 1),
+                "protein_target": p["protein_target_g"],
+                "canteen": _canteen_kcal(canteen, people, user, day),
+                "incomplete": not all(_kcal(nutrition, r) for r in meals)}
+    return days
+
+
+def fit(slots, slot, kcal, people, canteen):
+    """(label, misfit share) of a recipe with `kcal` per portion in the slot. Each eater with a kcal target has a budget of
+    (target - canteen kcal) / meals that day; it is a misfit when budget / kcal is outside FIT_RANGE. Label: None when no
+    eater has a target, `unknown` without kcal, else `ok`, or `poor` when some eater misfits.
+    Share = misfits / eaters with a target."""
+    eaters = [u for u in slot["eaters"] if people.get(u, {}).get("kcal_target")]
+    if not eaters:
+        return None, 0
+    if not kcal:
+        return "unknown", 0
+    misfits = 0
+    for user in eaters:
+        meals = max(1, sum(1 for s in slots if s["day"] == slot["day"] and s["active"] and not s["skipped"] and user in s["eaters"]))
+        budget = (people[user]["kcal_target"] - _canteen_kcal(canteen, people, user, slot["day"])) / meals
+        misfits += not FIT_RANGE[0] <= budget / kcal <= FIT_RANGE[1]
+    return ("poor" if misfits else "ok"), misfits / len(eaters)
 
 
 # ---- HA sensor (M9) ----

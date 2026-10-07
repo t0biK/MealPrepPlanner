@@ -982,7 +982,7 @@ Goal: nothing reaches Bring! unless a person ticks it; Chefkoch-style Bring! imp
 - [ ] A very calorie-dense recipe is rarely suggested and shows the fit hint when set by hand (manual).
 - [ ] Protein per person and day is shown against the protein target (manual).
 - [ ] The start page shows "deine Portion" or "Kantine" (manual, phone).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M13 – Categories and slot rules
 

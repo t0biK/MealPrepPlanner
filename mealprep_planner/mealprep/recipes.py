@@ -412,8 +412,8 @@ def rating_info(conn, recipe_id, user_id):
 # ---- planning (M7) ----
 
 def planning_recipes(conn):
-    """What the planner needs of every recipe: id, meal suitability, archived flag, tags."""
+    """What the planner needs of every recipe: id, meal suitability, archived flag, tags, kcal per portion (or None)."""
     tags = _tag_map(conn)
     return [{"id": r["id"], "for_lunch": bool(r["for_lunch"]), "for_dinner": bool(r["for_dinner"]),
-             "archived": bool(r["archived"]), "tags": tags.get(r["id"], [])}
-            for r in conn.execute("SELECT id, for_lunch, for_dinner, archived FROM recipes ORDER BY id")]
+             "archived": bool(r["archived"]), "tags": tags.get(r["id"], []), "kcal": r["kcal"]}
+            for r in conn.execute("SELECT id, for_lunch, for_dinner, archived, kcal FROM recipes ORDER BY id")]

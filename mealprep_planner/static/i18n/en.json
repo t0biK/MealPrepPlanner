@@ -228,5 +228,15 @@
   "check.bring_links.note": "Enter the link of a public recipe page (e.g. Chefkoch) and open the links on your phone. Nothing is sent.",
   "check.bring_links.import": "Import (as on the recipe page)",
   "check.bring_links.import_scaled": "Import with quantities (4 → 2 servings)",
-  "check.bring_links.open_web": "Open Bring! Web (candidate)"
+  "check.bring_links.open_web": "Open Bring! Web (candidate)",
+  "settings.kcal_target": "Daily calorie target (kcal)",
+  "settings.protein_target": "Daily protein target (g)",
+  "settings.canteen_kcal": "Canteen: kcal per lunch",
+  "settings.canteen_days": "Canteen on these weekdays",
+  "settings.targets_hint": "Targets cover only the planned meals (lunch and dinner), a canteen lunch included. Leave a field empty for no target. New weeks start with the canteen weekdays.",
+  "plan.canteen": "Canteen (lunch)",
+  "plan.incl_canteen": "incl. canteen",
+  "plan.fit_poor": "does not fit your targets",
+  "today.my_portion": "Your portion: {n}",
+  "today.canteen": "Canteen"
 }

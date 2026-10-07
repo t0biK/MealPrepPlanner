@@ -154,20 +154,39 @@ async function pageSettings(app) {
     }
   };
 
-  // household: everyone who eats along is put on every meal of a new week
+  // household: everyone who eats along is put on every meal of a new week; targets and canteen per person
   const household = el("ul", { className: "plain" }, ...(await api("GET", "api/household")).map((p) => {
-    const box = el("input", { type: "checkbox", checked: p.eats });
-    box.onchange = async () => {
+    const put = async (patch, undo) => {
       try {
-        await api("PUT", "api/household/" + encodeURIComponent(p.user_id), { eats: box.checked });
+        await api("PUT", "api/household/" + encodeURIComponent(p.user_id), patch);
         toast(t("settings.saved"));
       } catch (e) {
-        box.checked = !box.checked;
+        undo?.();
         toast(errorText(e));
       }
     };
+    const box = el("input", { type: "checkbox", checked: p.eats });
+    box.onchange = () => put({ eats: box.checked }, () => { box.checked = !box.checked; });
+    const field = (key, min, max, label) => {
+      const input = el("input", { type: "number", min, max, step: 1, value: p[key] ?? "", ariaLabel: `${p.display_name}: ${t(label)}` });
+      input.onchange = () => put({ [key]: input.value === "" ? null : Number(input.value) });
+      return el("label", {}, t(label), input);
+    };
+    const days = el("div", { className: "chips", role: "group", ariaLabel: `${p.display_name}: ${t("settings.canteen_days")}` },
+      ...[0, 1, 2, 3, 4, 5, 6].map((day) => {
+        const d = el("input", { type: "checkbox", checked: p.canteen_days.includes(day) });
+        d.onchange = () => {
+          const before = p.canteen_days;
+          p.canteen_days = d.checked ? [...before, day] : before.filter((x) => x !== day);
+          put({ canteen_days: p.canteen_days }, () => { p.canteen_days = before; d.checked = !d.checked; });
+        };
+        return el("label", { className: "chip pick" }, d, dayName(day, "short"));
+      }));
     return el("li", {}, el("label", { className: "row" }, el("strong", { textContent: p.display_name }),
-      el("span", {}, box, " " + t("settings.eats"))));
+      el("span", {}, box, " " + t("settings.eats"))),
+      el("div", { className: "fields" }, field("kcal_target", 300, 5000, "settings.kcal_target"),
+        field("protein_target_g", 10, 400, "settings.protein_target"), field("canteen_kcal", 0, 2000, "settings.canteen_kcal")),
+      el("div", { className: "muted", textContent: t("settings.canteen_days") }), days);
   }));
 
   const health = await api("GET", "api/health");
@@ -175,7 +194,8 @@ async function pageSettings(app) {
     el("h1", { textContent: t("settings.title") }),
     card(t("settings.language"), lang),
     card(t("settings.default_portions"), numberSetting("default_portions", 1, 12)),
-    card(t("settings.household"), household, el("p", { className: "muted", textContent: t("settings.household_hint") })),
+    card(t("settings.household"), household, el("p", { className: "muted", textContent: t("settings.household_hint") }),
+      el("p", { className: "muted", textContent: t("settings.targets_hint") })),
     card(t("settings.slot_pattern"), patternGrid, el("p", { className: "muted", textContent: t("settings.slot_pattern_hint") })),
     card(t("settings.repeat_window_days"), numberSetting("repeat_window_days", 0, 60)),
     card(t("settings.new_per_week"), numberSetting("new_per_week", 0, 14)),
@@ -264,6 +284,14 @@ function image(name) {
 
 function chips(names) {
   return el("div", { className: "chips" }, ...names.map((n) => el("span", { className: "chip", textContent: n })));
+}
+
+// portions in quarters: 1.25 -> "1¼"
+function fmtPortion(n) {
+  const whole = Math.floor(n);
+  const frac = { 0.25: "¼", 0.5: "½", 0.75: "¾" }[n - whole] ?? "";
+  if (n !== whole && !frac) return numText(n);
+  return (whole || !frac ? String(whole) : "") + frac;
 }
 
 const fmtScore = (n) => n.toLocaleString(document.documentElement.lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -385,14 +413,14 @@ async function pageRecipe(app, id, query = "") {
   await loadUnits();
   const r = await api("GET", "api/recipes/" + id);
   const wanted = Number(new URLSearchParams(query).get("p"));
-  let portions = Number.isInteger(wanted) && wanted >= 1 && wanted <= 50 ? wanted : r.servings;
+  let portions = Number.isFinite(wanted) && wanted > 0 && wanted <= 50 ? wanted : r.servings;  // the plan's portions may be fractions
 
-  const count = el("strong", { textContent: portions });
+  const count = el("strong", { textContent: fmtPortion(portions) });
   const minus = el("button", { textContent: "−", ariaLabel: "−" });
   const plus = el("button", { textContent: "+", ariaLabel: "+" });
   const ingredients = el("ul", { className: "plain" });
   const showIngredients = () => {
-    count.textContent = portions;
+    count.textContent = fmtPortion(portions);
     minus.disabled = portions <= 1;
     plus.disabled = portions >= Math.max(12, r.servings);
     ingredients.replaceChildren(...r.ingredients.map((i) => el("li", {},
@@ -662,7 +690,8 @@ const parseDate = (iso) => new Date(...iso.split("-").map((v, i) => (i === 1 ? v
 function reasonText(r) {
   if (!r) return "";
   const text = t(`plan.reason.${r.kind}`, { score: r.score == null ? "" : fmtScore(r.score) });
-  return r.tags?.length ? `${text} · ${r.tags.join(", ")}` : text;
+  const parts = [text, ...(r.tags?.length ? [r.tags.join(", ")] : []), ...(r.fit === "poor" ? [t("plan.fit_poor")] : [])];
+  return parts.join(" · ");
 }
 
 function totalsText(total) {
@@ -823,19 +852,22 @@ async function pageWeek(app, week) {
       ...household.filter((p) => p.eats || eating.has(p.user_id)).map((p) => {
         const box = el("input", { type: "checkbox", checked: eating.has(p.user_id) });
         box.onchange = () => slotAct(s, { action: "eater", user_id: p.user_id, on: box.checked });
-        return el("label", { className: "chip pick" }, box, p.display_name);
+        const portion = s.recipe && p.kcal_target && eating.has(p.user_id) ? " " + fmtPortion(s.portions_by_user[p.user_id]) : "";
+        return el("label", { className: "chip pick" }, box, p.display_name + portion);
       }));
+    const needsKcal = s.recipe && s.recipe.kcal == null && household.some((p) => p.kcal_target && eating.has(p.user_id));
     const past = plan.status === "confirmed" && s.date < plan.today;  // cooked: the server refuses reroll/set/clear
     const skip = el("input", { type: "checkbox", checked: s.skipped });
     skip.onchange = () => slotAct(s, { action: skip.checked ? "skip" : "unskip" });
     return el("div", { className: "slot" + (s.skipped ? " skipped" : "") },
-      el("div", { className: "row" }, meal, el("span", { className: "muted", textContent: t("plan.cooked", { n: s.cooked_portions }) })),
+      el("div", { className: "row" }, meal, el("span", { className: "muted", textContent: t("plan.cooked", { n: fmtPortion(s.cooked_portions) }) })),
       chips,
       el("div", { className: "row" }, el("span", { className: "muted", textContent: t("plan.guests") }),
         el("div", { className: "stepper", role: "group", ariaLabel: t("plan.guests") }, minus, el("strong", { textContent: s.guests }), plus)),
       ...(s.recipe ? [...image(s.recipe.image), el("a", { href: "#/rezepte/" + s.recipe.id, textContent: s.recipe.title })]
         : [el("span", { className: "muted", textContent: t("plan.empty_slot") })]),
       el("p", { className: "muted", textContent: reasonText(s.reason) }),
+      ...(needsKcal ? [el("p", {}, el("a", { href: `#/rezepte/${s.recipe.id}/bearbeiten`, textContent: t("form.estimate") }))] : []),
       el("div", { className: "actions" },
         ...(s.locked || past ? [] : [icon("🎲", t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
         ...(past ? [] : [icon("✏️", t("plan.replace"), () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id })))]),
@@ -844,6 +876,30 @@ async function pageWeek(app, week) {
         icon("⏸", t("plan.deactivate"), () => slotAct(s, { action: "deactivate" }))),
       ...(plan.status === "confirmed" && s.date <= plan.today ? [el("label", { className: "row" }, t("plan.skipped"), skip)] : []));
   };
+
+  // who eats at the canteen on a day (the lunch is then not cooked for them)
+  const canteenRow = (day) => {
+    const at = new Set(plan.totals[day].canteen);
+    return el("div", { className: "row" }, el("span", { className: "muted", textContent: t("plan.canteen") }),
+      el("div", { className: "chips", role: "group", ariaLabel: t("plan.canteen") },
+        ...household.filter((p) => p.eats || at.has(p.user_id)).map((p) => {
+          const box = el("input", { type: "checkbox", checked: at.has(p.user_id) });
+          box.onchange = () => act("canteen", { day, user_id: p.user_id, on: box.checked });
+          return el("label", { className: "chip pick" }, box, p.display_name);
+        })));
+  };
+
+  // per person: kcal and protein of the day against the targets (green within 10 %, amber outside)
+  const personTotals = (day) => Object.entries(plan.totals[day].totals_by_user).map(([id, v]) => {
+    const tone = (value, target) => (target && !v.incomplete ? (Math.abs(value - target) <= 0.1 * target ? " ok" : " warn") : "");
+    const part = (text, value, target) => el("span", { className: "tone" + tone(value, target), textContent: text });
+    const target = (n) => (n ? ` / ${n}` : "");
+    return el("p", { className: "muted" }, `${household.find((p) => p.user_id === id)?.display_name ?? id}: `,
+      part(`${Math.round(v.kcal)}${target(v.kcal_target)} kcal`, v.kcal, v.kcal_target),
+      ...(v.protein_target || v.protein_g ? [" · ",
+        part(`${t("recipe.protein")} ${Math.round(v.protein_g)}${target(v.protein_target)} g`, v.protein_g, v.protein_target)] : []),
+      ...(v.canteen ? [" · " + t("plan.incl_canteen")] : []), ...(v.incomplete ? [" · " + t("plan.incomplete")] : []));
+  });
 
   const show = () => {
     const lang = document.documentElement.lang;
@@ -868,8 +924,9 @@ async function pageWeek(app, week) {
       el("div", { className: "actions" }, generate, confirmBtn, bring),
       ...plan.dates.map((iso, day) => card(
         parseDate(iso).toLocaleDateString(lang, { weekday: "long", day: "numeric", month: "numeric" }),
-        ...plan.slots.filter((s) => s.day === day).map(slotView),
-        ...(totalsText(plan.totals[day]) ? [el("p", { className: "muted", textContent: totalsText(plan.totals[day]) })] : []))));
+        ...plan.slots.filter((s) => s.day === day).flatMap((s) => (s.meal === "lunch" ? [slotView(s), canteenRow(day)] : [slotView(s)])),
+        ...(Object.keys(plan.totals[day].totals_by_user).length ? personTotals(day)
+          : totalsText(plan.totals[day]) ? [el("p", { className: "muted", textContent: totalsText(plan.totals[day]) })] : []))));
   };
   app.replaceChildren(el("h1", { textContent: t("plan.title") }), root);
   show();
@@ -884,10 +941,17 @@ async function pageToday(app) {
   const mealRow = (meal, s) => el("div", { className: "row" },
     el("strong", { textContent: t(meal === "lunch" ? "form.lunch" : "form.dinner") }),
     s ? el("span", {}, el("a", { href: recipeHref(s.recipe_id, s.cooked_portions), textContent: s.title }), " ",
-      el("span", { className: "muted", textContent: t("today.portions", { n: s.cooked_portions }) }))
+      el("span", { className: "muted", textContent: t("today.portions", { n: fmtPortion(s.cooked_portions) }) }))
       : el("span", { className: "muted", textContent: "–" }));
+  // "Deine Portion: 1¼ (≈ 780 kcal)", or "Kantine" for a canteen lunch
+  const mine = (s, canteen) => {
+    const text = canteen ? t("today.canteen")
+      : s && s.my_portion != null ? t("today.my_portion", { n: fmtPortion(s.my_portion) }) + (s.my_kcal ? ` (≈ ${s.my_kcal} kcal)` : "") : "";
+    return text ? [el("p", { className: "muted", textContent: text })] : [];
+  };
   const dayCard = (label, d) => card(`${t(label)} · ${dayText(d.date)}`,
-    ...(d.lunch || d.dinner ? [mealRow("lunch", d.lunch), mealRow("dinner", d.dinner)]
+    ...(d.lunch || d.dinner || d.my_canteen
+      ? [mealRow("lunch", d.lunch), ...mine(d.lunch, d.my_canteen), mealRow("dinner", d.dinner), ...mine(d.dinner, false)]
       : [el("p", { className: "muted", textContent: t("today.nothing") })]));
 
   // "Wie war's?": rating a recipe removes it from the list

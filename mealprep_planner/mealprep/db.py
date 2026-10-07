@@ -143,11 +143,24 @@ MIGRATIONS = [
       SELECT s.week, s.day, s.meal, u.id FROM plan_slots s CROSS JOIN users u WHERE s.active = 1;
     ALTER TABLE plan_slots DROP COLUMN portions;
     """,
+    """
+    ALTER TABLE users ADD COLUMN kcal_target INTEGER;
+    ALTER TABLE users ADD COLUMN protein_target_g INTEGER;
+    ALTER TABLE users ADD COLUMN canteen_kcal INTEGER NOT NULL DEFAULT 700;
+    ALTER TABLE users ADD COLUMN canteen_days TEXT NOT NULL DEFAULT '[]';
+    CREATE TABLE plan_canteen (
+      week    TEXT NOT NULL REFERENCES plans(week),
+      day     INTEGER NOT NULL CHECK (day BETWEEN 0 AND 6),
+      user_id TEXT NOT NULL REFERENCES users(id),
+      PRIMARY KEY (week, day, user_id)
+    );
+    """,
 ]
 
 DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None,
             "slot_pattern": [True] * 14, "repeat_window_days": 14, "new_per_week": 2}
 INT_RANGES = {"default_portions": (1, 12), "repeat_window_days": (0, 60), "new_per_week": (0, 14)}
+HOUSEHOLD_INTS = {"kcal_target": (300, 5000), "protein_target_g": (10, 400), "canteen_kcal": (0, 2000)}  # the targets may be null
 ENTITY_DOMAIN = {"bring_entity": "todo", "ai_entity": "ai_task", "inbox_entity": "todo"}
 
 
@@ -248,21 +261,38 @@ def set_user_lang(conn, user_id, lang):
         conn.execute("UPDATE users SET lang = ? WHERE id = ?", (lang, user_id))
 
 
+def _is_int(value, low, high):
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
 def household(conn):
-    """[{user_id, display_name, eats}] of every registered user, sorted by name."""
-    rows = conn.execute("SELECT id, display_name, eats FROM users").fetchall()
-    return sorted(({"user_id": r["id"], "display_name": r["display_name"], "eats": bool(r["eats"])} for r in rows),
+    """[{user_id, display_name, eats, kcal_target, protein_target_g, canteen_kcal, canteen_days}] of every registered
+    user, sorted by name."""
+    rows = conn.execute("SELECT id, display_name, eats, kcal_target, protein_target_g, canteen_kcal, canteen_days FROM users")
+    return sorted(({"user_id": r["id"], "display_name": r["display_name"], "eats": bool(r["eats"]),
+                    "kcal_target": r["kcal_target"], "protein_target_g": r["protein_target_g"],
+                    "canteen_kcal": r["canteen_kcal"], "canteen_days": json.loads(r["canteen_days"])} for r in rows),
                   key=lambda p: (p["display_name"].casefold(), p["user_id"]))
 
 
 def set_household(conn, user_id, patch):
-    """Validate the whole patch (`eats`: bool), then store it. Returns the person's household entry, None for an unknown user."""
+    """Validate the whole patch (`eats`: bool; `kcal_target`, `protein_target_g`: null or in range; `canteen_kcal`: in range;
+    `canteen_days`: distinct weekdays 0-6), then store it. Returns the person's household entry, None for an unknown user."""
     if not isinstance(patch, dict):
         raise InvalidField("body")
     for key, value in patch.items():
-        if key != "eats" or not isinstance(value, bool):
+        if key == "eats":
+            ok = isinstance(value, bool)
+        elif key in HOUSEHOLD_INTS:
+            ok = _is_int(value, *HOUSEHOLD_INTS[key]) or (value is None and key != "canteen_kcal")
+        elif key == "canteen_days":
+            ok = isinstance(value, list) and all(_is_int(d, 0, 6) for d in value) and len(set(value)) == len(value)
+        else:
+            ok = False
+        if not ok:
             raise InvalidField(key)
     with conn:
-        if "eats" in patch:
-            conn.execute("UPDATE users SET eats = ? WHERE id = ?", (int(patch["eats"]), user_id))
+        for key, value in patch.items():  # keys are validated above, so they are safe column names
+            stored = int(value) if key == "eats" else json.dumps(sorted(value)) if key == "canteen_days" else value
+            conn.execute(f"UPDATE users SET {key} = ? WHERE id = ?", (stored, user_id))
     return next((p for p in household(conn) if p["user_id"] == user_id), None)

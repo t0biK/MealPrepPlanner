@@ -6,12 +6,12 @@ current / to_push / no_longer_needed: {name.casefold(): item}   pushed: {(name.c
 import threading
 from datetime import datetime
 
-from . import db, ha, ingredients, plans
+from . import db, ha, ingredients, plans, planner
 
 MAX_PANTRY = 300
 MAX_NAME = 100
 SLOTS_SQL = (
-    f"SELECT i.name, i.amount, i.unit, {plans.COOKED_SQL} AS cooked, r.servings FROM plan_slots s "
+    "SELECT s.day, s.meal, i.name, i.amount, i.unit, r.servings FROM plan_slots s "
     "JOIN recipes r ON r.id = s.recipe_id JOIN ingredients i ON i.recipe_id = r.id "
     "WHERE s.week = ? AND s.active = 1 AND s.skipped = 0")
 _push_lock = threading.Lock()  # one push at a time: two parallel pushes would add duplicates
@@ -42,10 +42,14 @@ def set_pantry(conn, names):
 
 def build_list(conn, week):
     """What the week needs (active, non-skipped, filled slots with someone to cook for; amounts scaled by cooked
-    portions / servings), with `pantry` set on the names of the pantry list (case-insensitive)."""
+    portions with the personal factors / servings), with `pantry` set on the names of the pantry list (case-insensitive)."""
+    plan = plans.read_plan(conn, week)
+    slots = {(s["day"], s["meal"]): s for s in plan["slots"]} if plan else {}
+    factors = plans.week_portions(conn, plan) if plan else {}
+    cooked = {key: planner.cooked_portions(s, factors) for key, s in slots.items()}
     items = ingredients.aggregate(
-        (r["name"], ingredients.scale(r["amount"], r["cooked"] / r["servings"]), r["unit"])
-        for r in conn.execute(SLOTS_SQL + " ORDER BY s.day, s.meal = 'dinner', i.pos", (week,)) if r["cooked"])
+        (r["name"], ingredients.scale(r["amount"], cooked[r["day"], r["meal"]] / r["servings"]), r["unit"])
+        for r in conn.execute(SLOTS_SQL + " ORDER BY s.day, s.meal = 'dinner', i.pos", (week,)) if cooked[r["day"], r["meal"]])
     pantry = {n.casefold() for n in get_pantry(conn)}
     return {k: {**i, "pantry": k in pantry} for k, i in items.items()}
 

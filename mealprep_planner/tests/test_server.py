@@ -310,10 +310,35 @@ class DevServerTest(unittest.TestCase):
         self.assertEqual(self.call("PUT", "/api/household/dev", [])[0], 400)
         self.assertEqual(self.call("PUT", "/api/household/nobody", {"eats": True}), (404, {"error": "not_found"}))
 
+    def test_targets_and_canteen_api(self):
+        try:
+            status, person = self.call("PUT", "/api/household/dev", {"kcal_target": 1700, "protein_target_g": 120, "canteen_kcal": 650,
+                                                                    "canteen_days": [3, 1]})
+            self.assertEqual((status, person["kcal_target"], person["canteen_kcal"], person["canteen_days"]), (200, 1700, 650, [1, 3]))
+            self.assertEqual(self.call("GET", "/api/household")[1][0]["protein_target_g"], 120)
+            for bad in ({"kcal_target": 100}, {"protein_target_g": 5}, {"canteen_kcal": 3000}, {"canteen_days": [7]}, {"canteen_days": [1, 1]}):
+                self.assertEqual(self.call("PUT", "/api/household/dev", bad), (400, {"error": "invalid_field", "field": next(iter(bad))}))
+            plan = self.call("GET", "/api/plans/2031-W23")[1]  # a new week starts from the default weekdays
+            self.assertEqual([plan["totals"][d]["canteen"] for d in range(4)], [[], ["dev"], [], ["dev"]])
+            self.assertEqual([p["user_id"] for p in self.plan_slot(plan, 1, "lunch")["eaters"]], [])
+            self.assertEqual([p["user_id"] for p in self.plan_slot(plan, 1, "dinner")["eaters"]], ["dev"])
+            post = lambda body: self.call("POST", "/api/plans/2031-W23/canteen", body)
+            status, plan = post({"day": 1, "user_id": "dev", "on": False})
+            self.assertEqual((status, plan["totals"][1]["canteen"]), (200, []))
+            self.assertEqual([p["user_id"] for p in self.plan_slot(plan, 1, "lunch")["eaters"]], ["dev"])
+            plan = post({"day": 2, "user_id": "dev", "on": True})[1]
+            self.assertEqual((plan["totals"][2]["canteen"], self.plan_slot(plan, 2, "lunch")["cooked_portions"]), (["dev"], 0))
+            for body, field in [({"day": 7, "user_id": "dev", "on": True}, "day"), ({"user_id": "dev", "on": True}, "day"),
+                                ({"day": 1, "user_id": "nobody", "on": True}, "user_id"), ({"day": 1, "user_id": "dev", "on": 1}, "on")]:
+                self.assertEqual(post(body), (400, {"error": "invalid_field", "field": field}))
+            self.assertEqual(self.call("POST", "/api/plans/2026-W54/canteen", {"day": 1, "user_id": "dev", "on": True})[1]["field"], "week")
+        finally:
+            self.call("PUT", "/api/household/dev", {"kcal_target": None, "protein_target_g": None, "canteen_kcal": 700, "canteen_days": []})
+
     def test_today_api(self):
         status, body = self.call("GET", "/api/today")
         self.assertEqual((status, sorted(body)), (200, ["rate", "today", "tomorrow"]))
-        self.assertEqual(sorted(body["today"]), ["date", "dinner", "lunch"])
+        self.assertEqual(sorted(body["today"]), ["date", "dinner", "lunch", "my_canteen"])
         self.assertEqual(body["today"]["date"], datetime.now().date().isoformat())
         self.assertIsInstance(body["rate"], list)
 

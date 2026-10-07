@@ -125,10 +125,12 @@ class DbTest(unittest.TestCase):
     def test_household_validation(self):
         db.upsert_user(self.conn, {"id": "u1", "name": "n", "display_name": "B"})
         db.upsert_user(self.conn, {"id": "u2", "name": "m", "display_name": "a"})
-        self.assertEqual(db.household(self.conn), [{"user_id": "u2", "display_name": "a", "eats": True},
-                                                   {"user_id": "u1", "display_name": "B", "eats": True}])
-        self.assertEqual(db.set_household(self.conn, "u1", {"eats": False}), {"user_id": "u1", "display_name": "B", "eats": False})
-        self.assertEqual(db.set_household(self.conn, "u1", {}), {"user_id": "u1", "display_name": "B", "eats": False})
+        defaults = {"kcal_target": None, "protein_target_g": None, "canteen_kcal": 700, "canteen_days": []}
+        self.assertEqual(db.household(self.conn), [{"user_id": "u2", "display_name": "a", "eats": True, **defaults},
+                                                   {"user_id": "u1", "display_name": "B", "eats": True, **defaults}])
+        self.assertEqual(db.set_household(self.conn, "u1", {"eats": False}),
+                         {"user_id": "u1", "display_name": "B", "eats": False, **defaults})
+        self.assertEqual(db.set_household(self.conn, "u1", {}), {"user_id": "u1", "display_name": "B", "eats": False, **defaults})
         self.assertIsNone(db.set_household(self.conn, "nobody", {"eats": True}))
         for patch, field in [({"eats": 1}, "eats"), ({"eats": "yes"}, "eats"), ({"eats": None}, "eats"), ({"nope": True}, "nope"),
                              ({"eats": True, "nope": True}, "nope"), ([], "body")]:
@@ -136,6 +138,53 @@ class DbTest(unittest.TestCase):
                 db.set_household(self.conn, "u1", patch)
             self.assertEqual(cm.exception.field, field)
         self.assertFalse(db.household(self.conn)[1]["eats"])  # a rejected patch changes nothing
+
+    def test_household_targets_and_canteen(self):
+        db.upsert_user(self.conn, {"id": "u1", "name": "n", "display_name": "N"})
+        full = {"kcal_target": 1700, "protein_target_g": 120, "canteen_kcal": 900, "canteen_days": [4, 0, 2]}
+        self.assertEqual(db.set_household(self.conn, "u1", full)["canteen_days"], [0, 2, 4])  # stored sorted
+        self.assertEqual({k: db.household(self.conn)[0][k] for k in full}, {**full, "canteen_days": [0, 2, 4]})
+        for patch in ({"kcal_target": 300}, {"kcal_target": 5000}, {"protein_target_g": 10}, {"protein_target_g": 400},
+                      {"canteen_kcal": 0}, {"canteen_kcal": 2000}, {"canteen_days": []}, {"canteen_days": [0, 6]},
+                      {"kcal_target": None, "protein_target_g": None}):
+            db.set_household(self.conn, "u1", patch)  # the ranges' edges are valid; the targets may be cleared
+        self.assertEqual((db.household(self.conn)[0]["kcal_target"], db.household(self.conn)[0]["protein_target_g"]), (None, None))
+        for patch, field in [({"kcal_target": 299}, "kcal_target"), ({"kcal_target": 5001}, "kcal_target"),
+                             ({"kcal_target": 1700.5}, "kcal_target"), ({"kcal_target": "1700"}, "kcal_target"),
+                             ({"kcal_target": True}, "kcal_target"), ({"protein_target_g": 9}, "protein_target_g"),
+                             ({"protein_target_g": 401}, "protein_target_g"), ({"canteen_kcal": -1}, "canteen_kcal"),
+                             ({"canteen_kcal": 2001}, "canteen_kcal"), ({"canteen_kcal": None}, "canteen_kcal"),
+                             ({"canteen_days": [7]}, "canteen_days"), ({"canteen_days": [-1]}, "canteen_days"),
+                             ({"canteen_days": [1, 1]}, "canteen_days"), ({"canteen_days": [True]}, "canteen_days"),
+                             ({"canteen_days": [[1]]}, "canteen_days"), ({"canteen_days": "1"}, "canteen_days"),
+                             ({"canteen_days": None}, "canteen_days")]:
+            with self.assertRaises(db.InvalidField, msg=patch) as cm:
+                db.set_household(self.conn, "u1", patch)
+            self.assertEqual(cm.exception.field, field)
+        db.set_household(self.conn, "u1", {"kcal_target": 2000})
+        with self.assertRaises(db.InvalidField):  # a rejected patch changes nothing, also for its valid keys
+            db.set_household(self.conn, "u1", {"kcal_target": 1800, "canteen_kcal": 5000})
+        self.assertEqual(db.household(self.conn)[0]["kcal_target"], 2000)
+
+    def test_migration_8_on_a_db_at_version_7(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.connect(tmp)
+            try:
+                for n, script in enumerate(db.MIGRATIONS[:7], start=1):  # the database as shipped with M11
+                    conn.executescript(f"BEGIN; {script} PRAGMA user_version = {n}; COMMIT;")
+                with conn:
+                    conn.execute("INSERT INTO users (id, name, display_name, first_seen, last_seen) VALUES ('a', 'a', 'A', 'x', 'x')")
+                    conn.execute("INSERT INTO plans (week, status) VALUES ('2026-W41', 'draft')")
+                db.migrate(conn)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], len(db.MIGRATIONS))
+                self.assertEqual(db.household(conn), [{"user_id": "a", "display_name": "A", "eats": True, "kcal_target": None,
+                                                       "protein_target_g": None, "canteen_kcal": 700, "canteen_days": []}])
+                with conn:
+                    conn.execute("INSERT INTO plan_canteen (week, day, user_id) VALUES ('2026-W41', 2, 'a')")
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute("INSERT INTO plan_canteen (week, day, user_id) VALUES ('2026-W41', 7, 'a')")
+            finally:
+                conn.close()
 
     def test_user_upsert_and_lang(self):
         user = {"id": "u1", "name": "n", "display_name": "N"}

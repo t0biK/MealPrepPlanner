@@ -637,3 +637,32 @@ ul.plain a {
   width: auto;
   white-space: nowrap;
 }
+
+/* personal portions (M12) */
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.5rem 0.75rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.tone.ok {
+  color: var(--ok);
+}
+
+.tone.warn {
+  color: #b26a00;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tone.warn {
+    color: #f0b45a;
+  }
+}

@@ -317,17 +317,17 @@ class EatersTest(unittest.TestCase):
         slots = self.slots()
         self.assertEqual({tuple(s["eaters"]) for k, s in slots.items() if s["active"]}, {("a", "b")})
         self.assertEqual(slots[(0, "dinner")]["eaters"], [])
-        self.assertEqual({(s["guests"], plans.cooked_portions(s)) for s in slots.values() if s["active"]}, {(0, 2)})
+        self.assertEqual({(s["guests"], planner.cooked_portions(s, {})) for s in slots.values() if s["active"]}, {(0, 2)})
 
     def test_eater_and_guests_actions(self):
         s = self.act(0, "lunch", action="eater", user_id="b", on=False)
-        self.assertEqual((s["eaters"], plans.cooked_portions(s)), (["a"], 1))
+        self.assertEqual((s["eaters"], planner.cooked_portions(s, {})), (["a"], 1))
         s = self.act(0, "lunch", action="eater", user_id="c", on=True)  # a non-participant may be added by hand
         self.assertEqual(s["eaters"], ["a", "c"])
         s = self.act(0, "lunch", action="eater", user_id="c", on=True)  # idempotent
         self.assertEqual(s["eaters"], ["a", "c"])
         s = self.act(0, "lunch", action="guests", n=3)
-        self.assertEqual((s["guests"], plans.cooked_portions(s)), (3, 5))
+        self.assertEqual((s["guests"], planner.cooked_portions(s, {})), (3, 5))
         for n in (0, 12):
             self.assertEqual(self.act(0, "lunch", action="guests", n=n)["guests"], n)
         for n in (-1, 13, 1.5, "1", True, None):

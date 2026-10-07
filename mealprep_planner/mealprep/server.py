@@ -544,6 +544,14 @@ def api_plan_slot(h, m):
     h.send_json(200, _plan_json(h, week))
 
 
+def api_plan_canteen(h, m):
+    week = _week(m)
+    body = _body_dict(h)
+    plans.set_canteen(h.conn, week, body.get("day"), body.get("user_id"), body.get("on"), db.get_settings(h.conn))
+    worker.notify_plan_changed()
+    h.send_json(200, _plan_json(h, week))
+
+
 def api_confirm_plan(h, m):
     """Only confirms; nothing goes to Bring! (M10)."""
     week = _week(m)
@@ -605,6 +613,7 @@ ROUTES = [
     ("GET", re.compile(r"^/api/plans/([^/]+)$"), api_get_plan),
     ("POST", re.compile(r"^/api/plans/([^/]+)/generate$"), api_generate_plan),
     ("POST", re.compile(r"^/api/plans/([^/]+)/slots/(\d+)/([a-z]+)$"), api_plan_slot),
+    ("POST", re.compile(r"^/api/plans/([^/]+)/canteen$"), api_plan_canteen),
     ("POST", re.compile(r"^/api/plans/([^/]+)/confirm$"), api_confirm_plan),
     ("GET", re.compile(r"^/api/plans/([^/]+)/shopping$"), api_get_shopping),
     ("POST", re.compile(r"^/api/plans/([^/]+)/push$"), api_push_plan),

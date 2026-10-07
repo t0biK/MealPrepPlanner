@@ -156,11 +156,33 @@ class TodayViewTest(PlanDataTest):
         self.slot(TODAY + timedelta(days=1), "lunch", "Curry")
         self.slot(TODAY + timedelta(days=1), "dinner", "Pizza", skipped=1)
         view = plans.today_view(self.conn, "me", TODAY)
-        self.assertEqual(view["today"], {"date": "2026-10-14", "lunch": None, "dinner": {
-            "recipe_id": self.recipe("Carbonara"), "title": "Carbonara", "image": None, "cooked_portions": 3}})
-        self.assertEqual(view["tomorrow"], {"date": "2026-10-15", "dinner": None, "lunch": {
-            "recipe_id": self.recipe("Curry"), "title": "Curry", "image": None, "cooked_portions": 2}})
+        self.assertEqual(view["today"], {"date": "2026-10-14", "my_canteen": False, "lunch": None, "dinner": {
+            "recipe_id": self.recipe("Carbonara"), "title": "Carbonara", "image": None, "cooked_portions": 3,
+            "my_portion": 1.0, "my_kcal": None}})
+        self.assertEqual(view["tomorrow"], {"date": "2026-10-15", "my_canteen": False, "dinner": None, "lunch": {
+            "recipe_id": self.recipe("Curry"), "title": "Curry", "image": None, "cooked_portions": 2,
+            "my_portion": 1.0, "my_kcal": None}})
         self.assertEqual(view["rate"], [])
+
+    def test_my_portion_my_kcal_and_my_canteen(self):
+        with self.conn:
+            self.conn.execute("UPDATE users SET kcal_target = 1700 WHERE id = 'me'")
+        self.slot(TODAY, "lunch", "Suppe", eaters=("me", "other"), guests=0)
+        self.slot(TODAY, "dinner", "Curry", eaters=("me",), guests=0)
+        self.slot(TODAY + timedelta(days=1), "lunch", "Salat", eaters=("other",), guests=0)  # I do not eat it
+        with self.conn:
+            for title, kcal in (("Suppe", 450), ("Curry", 800)):
+                self.conn.execute("UPDATE recipes SET kcal = ?, nutrition_source = 'manual' WHERE id = ?", (kcal, self.recipe(title)))
+            self.conn.execute("INSERT INTO plan_canteen (week, day, user_id) VALUES (?, ?, 'other')",
+                              (planner.week_of(TODAY), TODAY.weekday()))
+        mine, theirs = plans.today_view(self.conn, "me", TODAY), plans.today_view(self.conn, "other", TODAY)
+        self.assertEqual((mine["today"]["lunch"]["my_portion"], mine["today"]["lunch"]["my_kcal"]), (1.25, 563))  # 1.25 * 450 = 562.5, halves up
+        self.assertEqual((mine["today"]["dinner"]["my_portion"], mine["today"]["dinner"]["my_kcal"]), (1.25, 1000))
+        self.assertEqual(mine["today"]["lunch"]["cooked_portions"], 2.25)  # me 1.25 + other 1
+        self.assertEqual((mine["today"]["my_canteen"], theirs["today"]["my_canteen"], mine["tomorrow"]["my_canteen"]), (False, True, False))
+        self.assertEqual((theirs["today"]["lunch"]["my_portion"], theirs["today"]["lunch"]["my_kcal"]), (1.0, 450))
+        self.assertEqual((theirs["today"]["dinner"]["my_portion"], theirs["today"]["dinner"]["my_kcal"]), (None, None))  # not an eater
+        self.assertEqual((mine["tomorrow"]["lunch"]["my_portion"], mine["tomorrow"]["lunch"]["my_kcal"]), (None, None))
 
     def test_does_not_create_plans(self):
         plans.today_view(self.conn, "me", TODAY)

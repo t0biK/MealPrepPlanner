@@ -228,5 +228,15 @@
   "check.bring_links.note": "Rezept-Link einer öffentlichen Seite (z. B. Chefkoch) eingeben und die Links auf dem Handy öffnen. Es wird nichts gesendet.",
   "check.bring_links.import": "Import (wie auf der Rezeptseite)",
   "check.bring_links.import_scaled": "Import mit Mengen (4 → 2 Portionen)",
-  "check.bring_links.open_web": "Bring! Web öffnen (Kandidat)"
+  "check.bring_links.open_web": "Bring! Web öffnen (Kandidat)",
+  "settings.kcal_target": "Kalorienziel pro Tag (kcal)",
+  "settings.protein_target": "Eiweißziel pro Tag (g)",
+  "settings.canteen_kcal": "Kantine: kcal pro Mittagessen",
+  "settings.canteen_days": "Kantine an diesen Wochentagen",
+  "settings.targets_hint": "Die Ziele gelten nur für die geplanten Mahlzeiten (Mittag und Abend), ein Kantinenessen eingerechnet. Feld leer lassen = kein Ziel. Neue Wochen starten mit den Kantine-Wochentagen.",
+  "plan.canteen": "Kantine (Mittag)",
+  "plan.incl_canteen": "inkl. Kantine",
+  "plan.fit_poor": "passt nicht zu euren Zielen",
+  "today.my_portion": "Deine Portion: {n}",
+  "today.canteen": "Kantine"
 }
