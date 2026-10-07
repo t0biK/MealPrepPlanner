@@ -6,6 +6,7 @@ from pathlib import Path
 from mealprep import db, recipes
 
 TAGS = ["Nudeln", "Italienisch", "Schnell"]
+ALL = [True] * 14
 IMAGE = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.jpg"
 
 SAMPLE = {
@@ -242,11 +243,11 @@ class StoreTest(unittest.TestCase):
         for bad in ("grillen", "", "  ", "x" * 51, None):
             with self.assertRaises(db.InvalidField):
                 recipes.create_tag(self.conn, bad)
-        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "BBQ", False)["name"], "BBQ")
-        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "bbq", False)["name"], "bbq")  # same tag, new case
+        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "BBQ", False, ALL)["name"], "BBQ")
+        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "bbq", False, ALL)["name"], "bbq")  # same tag, new case
         with self.assertRaises(db.InvalidField):
-            recipes.update_tag(self.conn, tag["id"], "Fleisch", False)
-        self.assertIsNone(recipes.update_tag(self.conn, 9999, "Foo", False))
+            recipes.update_tag(self.conn, tag["id"], "Fleisch", False, ALL)
+        self.assertIsNone(recipes.update_tag(self.conn, 9999, "Foo", False, ALL))
 
     def test_tag_category_round_trip(self):
         tags = {t["name"]: t for t in recipes.list_tags(self.conn)}
@@ -254,22 +255,48 @@ class StoreTest(unittest.TestCase):
                          sorted(["Schnell", "Meal Prep", "Sonntagsessen", "Leicht", "Proteinreich", "Lunchbox", "Ofengericht", "Gäste"]))
         self.assertFalse(tags["Nudeln"]["category"])
         nudeln = tags["Nudeln"]["id"]
-        self.assertEqual(recipes.update_tag(self.conn, nudeln, "Nudeln", True), {"id": nudeln, "name": "Nudeln", "category": True})
+        self.assertEqual(recipes.update_tag(self.conn, nudeln, "Nudeln", True, ALL), {"id": nudeln, "name": "Nudeln", "category": True, "slots": ALL})
         self.assertTrue(next(t for t in recipes.list_tags(self.conn) if t["id"] == nudeln)["category"])
-        self.assertFalse(recipes.update_tag(self.conn, nudeln, "Nudeln", False)["category"])
+        self.assertFalse(recipes.update_tag(self.conn, nudeln, "Nudeln", False, ALL)["category"])
         for bad in (1, 0, None, "yes"):
             with self.assertRaises(db.InvalidField) as cm:
-                recipes.update_tag(self.conn, nudeln, "Nudeln", bad)
+                recipes.update_tag(self.conn, nudeln, "Nudeln", bad, ALL)
             self.assertEqual(cm.exception.field, "category")
 
-    def test_a_tag_that_stops_being_a_category_is_no_slot_rule(self):
-        tag_id = next(t["id"] for t in recipes.list_tags(self.conn) if t["name"] == "Lunchbox")
-        self.conn.execute("INSERT INTO plans (week, status) VALUES ('2026-W41', 'draft')")
-        self.conn.execute("INSERT INTO plan_slots (week, day, meal, active, rule_tag_id) VALUES ('2026-W41', 0, 'lunch', 1, ?)", (tag_id,))
-        recipes.update_tag(self.conn, tag_id, "Lunchbox", True)
-        self.assertEqual(self.conn.execute("SELECT rule_tag_id FROM plan_slots").fetchone()[0], tag_id)
-        recipes.update_tag(self.conn, tag_id, "Lunchbox", False)
-        self.assertIsNone(self.conn.execute("SELECT rule_tag_id FROM plan_slots").fetchone()[0])
+    def test_tag_slots_round_trip_and_validation(self):
+        tags = {t["name"]: t for t in recipes.list_tags(self.conn)}
+        self.assertTrue(all(t["slots"] == ALL for t in tags.values()))  # NULL reads as all slots
+        self.assertEqual(recipes.create_tag(self.conn, "Vesper")["slots"], ALL)
+        schnell = tags["Schnell"]["id"]
+        dinners = [i % 2 == 1 for i in range(14)]
+        self.assertEqual(recipes.update_tag(self.conn, schnell, "Schnell", True, dinners)["slots"], dinners)
+        self.assertEqual(next(t for t in recipes.list_tags(self.conn) if t["id"] == schnell)["slots"], dinners)
+        self.assertEqual(recipes.update_tag(self.conn, schnell, "Schnell", True, ALL)["slots"], ALL)
+        self.assertIsNone(self.conn.execute("SELECT slots FROM tags WHERE id = ?", (schnell,)).fetchone()[0])  # all ticked = NULL
+        for bad in (ALL[:13], ALL + [True], [1] * 14, [True] * 13 + [None], ["x"] * 14, "x" * 14, None, {}):
+            with self.assertRaises(db.InvalidField, msg=bad) as cm:
+                recipes.update_tag(self.conn, schnell, "Schnell", True, bad)
+            self.assertEqual(cm.exception.field, "slots")
+
+    def test_allowed_slots_of_a_recipe_are_the_intersection_of_its_categories(self):
+        ids = {t["name"]: t["id"] for t in recipes.list_tags(self.conn)}
+        dinners = [i % 2 == 1 for i in range(14)]
+        monday_to_wednesday = [i < 6 for i in range(14)]
+        recipes.update_tag(self.conn, ids["Schnell"], "Schnell", True, dinners)
+        recipes.update_tag(self.conn, ids["Leicht"], "Leicht", True, monday_to_wednesday)
+        recipes.update_tag(self.conn, ids["Nudeln"], "Nudeln", False, [False] * 14)  # no category: its slots are ignored
+
+        def slots(**kw):
+            rid = self.make(**kw)
+            return next(r["slots"] for r in recipes.planning_recipes(self.conn) if r["id"] == rid)
+
+        self.assertEqual(slots(tags=["Schnell"]), dinners)
+        self.assertEqual(slots(tags=["Schnell", "Leicht"]), [i in (1, 3, 5) for i in range(14)])
+        self.assertEqual(slots(tags=["Schnell", "Leicht", "Nudeln"]), [i in (1, 3, 5) for i in range(14)])
+        self.assertEqual(slots(tags=["Nudeln"]), ALL)
+        self.assertEqual(slots(tags=[]), ALL)  # no categories
+        recipes.update_tag(self.conn, ids["Schnell"], "Schnell", False, dinners)  # it stops being a category: slots do not count
+        self.assertEqual(slots(tags=["Schnell"]), ALL)
 
     def test_auto_categories_at_the_boundaries(self):
         auto = lambda minutes=None, **n: recipes.auto_categories({"total_minutes": minutes, "nutrition": {"source": "page", **n} if n else None})

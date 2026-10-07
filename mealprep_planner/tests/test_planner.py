@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 
-from mealprep import db, plans, planner, shopping
+from mealprep import db, plans, planner, recipes, shopping
 
 WEEK = "2026-W41"  # Monday 2026-10-05
 MONDAY = date(2026, 10, 5)
@@ -11,8 +11,9 @@ SETTINGS = {"repeat_window_days": 14, "new_per_week": 2}
 USERS = ["u"]
 
 
-def recipe(rid, lunch=True, dinner=True, archived=False, tags=()):
-    return {"id": rid, "for_lunch": lunch, "for_dinner": dinner, "archived": archived, "tags": list(tags)}
+def recipe(rid, lunch=True, dinner=True, archived=False, tags=(), slots=None):
+    return {"id": rid, "for_lunch": lunch, "for_dinner": dinner, "archived": archived, "tags": list(tags),
+            **({"slots": slots} if slots else {})}
 
 
 def make_plan(active=None, overrides=None):
@@ -367,130 +368,90 @@ class EatersTest(unittest.TestCase):
         self.assertEqual(self.slots("2026-W42")[(0, "lunch")]["eaters"], ["b"])
 
 
-class CategoryRuleTest(unittest.TestCase):
-    """M13: a slot's category rule filters the candidates and falls back to any recipe when none qualifies."""
+class CategorySlotsTest(unittest.TestCase):
+    """M15: the slots a recipe's categories allow (`slots`, 14 bools) limit where generate and reroll put it."""
+    DINNERS = [i % 2 == 1 for i in range(14)]
+    SUNDAY = [i >= 12 for i in range(14)]
 
-    def monday_dinner(self, recipes, rule, seed=1, **kw):
-        out = gen(make_plan({(0, "dinner")}, {(0, "dinner"): {"rule": rule}}), recipes, seed=seed, **kw)
-        return slot(out, 0, "dinner")
-
-    def test_rule_filters_the_candidates(self):
-        recipes = [recipe(1, tags=["Schnell"]), recipe(2, tags=["Leicht"]), recipe(3), recipe(4, tags=["Schnell", "Leicht"])]
-        for seed in range(30):
-            s = self.monday_dinner(recipes, "Schnell", seed)
-            self.assertIn(s["recipe_id"], (1, 4))
-            self.assertEqual((s["reason"]["rule"], s["reason"]["rule_met"]), ("Schnell", True))
-
-    def test_rule_still_respects_the_other_candidate_rules(self):
-        recipes = [recipe(1, tags=["Schnell"], archived=True), recipe(2, tags=["Schnell"], lunch=False, dinner=True),
-                   recipe(3, tags=["Schnell"], dinner=False), recipe(4, tags=["Schnell"]), recipe(5)]
-        for seed in range(30):
-            self.assertEqual(self.monday_dinner(recipes, "Schnell", seed, ratings=rated(2, 4))["recipe_id"] in (2, 4), True)
-
-    def test_fallback_to_any_recipe_says_so(self):
-        recipes = [recipe(1, tags=["Leicht"]), recipe(2)]
-        picked = set()
-        for seed in range(30):
-            s = self.monday_dinner(recipes, "Schnell", seed)
-            picked.add(s["recipe_id"])
-            self.assertEqual((s["reason"]["rule"], s["reason"]["rule_met"]), ("Schnell", False))
-        self.assertEqual(picked, {1, 2})
-        out = gen(make_plan({(0, "dinner")}, {(0, "dinner"): {"rule": "Schnell"}}), [])  # nothing at all: still reason none
-        self.assertEqual(slot(out, 0, "dinner")["reason"], {"kind": "none"})
-
-    def test_no_rule_changes_nothing(self):
-        s = self.monday_dinner([recipe(1), recipe(2, tags=["Schnell"])], None)
-        self.assertEqual((s["reason"]["rule"], s["reason"]["rule_met"]), (None, True))
-        out = gen(make_plan({(0, "dinner")}), [recipe(1)])  # slots without a `rule` key work too
-        self.assertEqual(slot(out, 0, "dinner")["recipe_id"], 1)
-
-    def test_a_rule_applies_per_slot(self):
-        recipes = [recipe(1, tags=["Schnell"]), recipe(2, tags=["Leicht"])]
-        plan = make_plan({(0, "lunch"), (0, "dinner")}, {(0, "lunch"): {"rule": "Leicht"}, (0, "dinner"): {"rule": "Schnell"}})
-        out = gen(plan, recipes)
-        self.assertEqual((slot(out, 0, "lunch")["recipe_id"], slot(out, 0, "dinner")["recipe_id"]), (2, 1))
-
-    def test_reroll_keeps_the_rule_and_falls_back_without_a_match(self):
-        recipes = [recipe(1, tags=["Schnell"]), recipe(2, tags=["Schnell"]), recipe(3)]
-        plan = make_plan({(0, "dinner")}, {(0, "dinner"): {"rule": "Schnell", "recipe_id": 1}})
+    def test_a_dinner_only_recipe_never_lands_in_a_lunch(self):
+        recipes = [recipe(i, slots=self.DINNERS) for i in range(1, 6)] + [recipe(i) for i in range(6, 16)]
         for seed in range(20):
-            out = planner.reroll(plan, 0, "dinner", recipes, {}, USERS, [], SETTINGS, random.Random(seed))
-            self.assertEqual((slot(out, 0, "dinner")["recipe_id"], slot(out, 0, "dinner")["reason"]["rule_met"]), (2, True))
-        plan = make_plan({(0, "dinner")}, {(0, "dinner"): {"rule": "Schnell", "recipe_id": 2}})
-        out = planner.reroll(plan, 0, "dinner", recipes[1:], {}, USERS, [], SETTINGS, random.Random(1))  # the only Schnell one is current
-        self.assertEqual((slot(out, 0, "dinner")["recipe_id"], slot(out, 0, "dinner")["reason"]["rule_met"]), (3, False))
+            out = gen(make_plan(), recipes, seed=seed)
+            self.assertFalse({s["recipe_id"] for s in out if s["meal"] == "lunch"} & set(range(1, 6)), seed)
+            self.assertTrue(any(s["recipe_id"] in range(1, 6) for s in out if s["meal"] == "dinner"), seed)  # it is still used
+
+    def test_a_sunday_only_recipe_only_lands_on_sunday(self):
+        recipes = [recipe(i, slots=self.SUNDAY) for i in range(1, 4)] + [recipe(i) for i in range(4, 20)]
+        for seed in range(20):
+            out = gen(make_plan(), recipes, seed=seed)
+            self.assertEqual({s["day"] for s in out if s["recipe_id"] in (1, 2, 3)} - {6}, set(), seed)
+
+    def test_the_allowed_slots_are_the_mask_of_the_recipe(self):
+        mask = [i in (1, 3, 5) for i in range(14)]  # dinner of Monday to Wednesday (two categories intersected)
+        for seed in range(20):
+            out = gen(make_plan(), [recipe(1, slots=mask)], seed=seed)
+            self.assertIn([(s["day"], s["meal"]) for s in out if s["recipe_id"] == 1][0], [(0, "dinner"), (1, "dinner"), (2, "dinner")])
+
+    def test_no_candidate_leaves_the_slot_empty(self):
+        out = gen(make_plan({(0, "lunch")}), [recipe(1, slots=self.DINNERS)])
+        self.assertEqual((slot(out, 0, "lunch")["recipe_id"], slot(out, 0, "lunch")["reason"]), (None, {"kind": "none"}))
+        self.assertIsNone(slot(gen(make_plan({(0, "lunch")}), [recipe(1, slots=[False] * 14)]), 0, "lunch")["recipe_id"])
+
+    def test_a_recipe_without_slots_may_go_anywhere(self):
+        self.assertEqual(slot(gen(make_plan({(6, "lunch")}), [recipe(1)]), 6, "lunch")["recipe_id"], 1)
+
+    def test_reroll_respects_the_mask(self):
+        recipes = [recipe(9), recipe(1, slots=self.DINNERS), recipe(2)]
+        plan = make_plan({(0, "lunch")}, {(0, "lunch"): {"recipe_id": 9}})
+        for seed in range(20):
+            out = planner.reroll(plan, 0, "lunch", recipes, {}, USERS, [], SETTINGS, random.Random(seed))
+            self.assertEqual(slot(out, 0, "lunch")["recipe_id"], 2)
+        out = planner.reroll(plan, 0, "lunch", recipes[:2], {}, USERS, [], SETTINGS, random.Random(1))  # no allowed alternative
+        self.assertEqual(slot(out, 0, "lunch")["recipe_id"], 9)
 
 
-class PlanRulesTest(unittest.TestCase):
-    """M13: slot rules in plans.py on a real DB."""
+class PlanCategorySlotsTest(unittest.TestCase):
+    """M15: category slots in plans.py on a real DB; the old slot rules are gone."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.conn = db.connect(self.tmp.name)
         db.migrate(self.conn)
         db.upsert_user(self.conn, {"id": "a", "name": "a", "display_name": "Anna"})
-        self.tag = {r["name"]: r["id"] for r in self.conn.execute("SELECT id, name FROM tags")}
-        self.rules = [self.tag["Schnell"] if i in (3, 5) else None for i in range(14)]  # Tuesday and Wednesday dinner
-        self.settings = db.set_settings(self.conn, {"slot_rules": self.rules})
+        self.settings = db.get_settings(self.conn)
+        tag = self.conn.execute("SELECT id FROM tags WHERE name = 'Gäste'").fetchone()[0]
+        recipes.update_tag(self.conn, tag, "Gäste", True, [i % 2 == 1 for i in range(14)])  # dinners only
+        with self.conn:
+            for rid in range(1, 6):  # five dinner-only recipes, ten without category
+                self.conn.execute("INSERT INTO recipes (id, title, source_kind, servings, created_at, updated_at) VALUES (?, 'r', 'manual', 2, 'x', 'x')", (rid,))
+                self.conn.execute("INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, ?)", (rid, tag))
+            for rid in range(6, 16):
+                self.conn.execute("INSERT INTO recipes (id, title, source_kind, servings, created_at, updated_at) VALUES (?, 'r', 'manual', 2, 'x', 'x')", (rid,))
 
     def tearDown(self):
         self.conn.close()
         self.tmp.cleanup()
 
-    def slots(self, week=WEEK):
-        return {(s["day"], s["meal"]): s for s in plans.load_plan(self.conn, week, self.settings)["slots"]}
+    def slots(self):
+        return {(s["day"], s["meal"]): s for s in plans.load_plan(self.conn, WEEK, self.settings)["slots"]}
 
-    def act(self, day, meal, **body):
-        plans.slot_action(self.conn, WEEK, day, meal, body, self.settings, random.Random(1), MONDAY)
-        return self.slots()[(day, meal)]
+    def test_generate_keeps_the_category_recipes_out_of_the_lunches(self):
+        for seed in range(10):
+            plans.generate(self.conn, WEEK, self.settings, random.Random(seed), MONDAY)
+            lunches = {s["recipe_id"] for (day, meal), s in self.slots().items() if meal == "lunch"}
+            self.assertFalse(lunches & set(range(1, 6)), seed)
 
-    def test_a_new_week_copies_the_rules(self):
-        self.assertEqual([s["rule"] for s in self.slots().values()], ["Schnell" if r else None for r in self.rules])
-        self.assertEqual(self.conn.execute("SELECT COUNT(rule_tag_id) FROM plan_slots").fetchone()[0], 2)
+    def test_set_by_hand_ignores_the_slots(self):
+        plans.slot_action(self.conn, WEEK, 0, "lunch", {"action": "set", "recipe_id": 1}, self.settings, random.Random(1), MONDAY)
+        self.assertEqual(self.slots()[(0, "lunch")]["recipe_id"], 1)
 
-    def test_a_rule_changed_in_one_week_leaves_the_setting_and_other_weeks_alone(self):
-        self.slots("2026-W42")
-        self.assertEqual(self.act(0, "lunch", action="rule", tag_id=self.tag["Leicht"])["rule"], "Leicht")
-        self.assertIsNone(self.act(1, "dinner", action="rule", tag_id=None)["rule"])
-        self.assertIsNone(self.act(1, "dinner", action="rule")["rule"])
-        self.assertEqual(db.get_settings(self.conn)["slot_rules"], self.rules)
-        self.assertEqual(self.slots("2026-W42")[(0, "lunch")]["rule"], None)
-        self.assertEqual(self.slots("2026-W42")[(1, "dinner")]["rule"], "Schnell")
-        self.assertEqual(self.slots()[(0, "lunch")]["rule"], "Leicht")  # stored
-
-    def test_only_category_tags_are_rules(self):
-        for bad in (self.tag["Nudeln"], 99999, "1", 1.0, True, [1]):
-            with self.assertRaises(db.InvalidField, msg=bad) as cm:
-                self.act(0, "lunch", action="rule", tag_id=bad)
-            self.assertEqual(cm.exception.field, "tag_id")
-
-    def test_generate_follows_the_rules_and_keeps_them(self):
-        quick, other = {"id": 1, "title": "q", "tags": ["Schnell"]}, {"id": 2, "title": "o", "tags": []}
-        with self.conn:
-            for r in (quick, other):
-                self.conn.execute("INSERT INTO recipes (id, title, source_kind, servings, created_at, updated_at) VALUES (?, ?, 'manual', 2, 'x', 'x')",
-                                  (r["id"], r["title"]))
-            self.conn.execute("INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (1, ?)", (self.tag["Schnell"],))
-        self.settings["slot_pattern"] = [i in (3, 5) for i in range(14)]  # only the two ruled dinners
-        plans.generate(self.conn, WEEK, self.settings, random.Random(1), MONDAY)
-        slots = {k: s for k, s in self.slots().items() if s["active"]}
-        self.assertEqual(slots[(1, "dinner")]["recipe_id"], 1)  # the only Schnell recipe
-        self.assertEqual((slots[(1, "dinner")]["reason"]["rule"], slots[(1, "dinner")]["reason"]["rule_met"]), ("Schnell", True))
-        self.assertEqual(slots[(2, "dinner")]["recipe_id"], 2)  # used already: falls back to any recipe
-        self.assertEqual((slots[(2, "dinner")]["reason"]["rule"], slots[(2, "dinner")]["reason"]["rule_met"]), ("Schnell", False))
-        self.assertEqual([s["rule"] for s in self.slots().values()], ["Schnell" if r else None for r in self.rules])  # generate keeps them
-        view = plans.view(self.conn, WEEK, self.settings, MONDAY)
-        self.assertEqual([s["rule"] for s in view["slots"]], ["Schnell" if r else None for r in self.rules])
-
-    def test_deleting_a_category_tag_clears_the_rules(self):
-        self.slots()
-        self.act(0, "lunch", action="rule", tag_id=self.tag["Leicht"])
-        with self.conn:
-            self.conn.execute("DELETE FROM tags WHERE name = 'Schnell'")
-        self.settings = db.get_settings(self.conn)  # as every request reads it
-        self.assertEqual(self.settings["slot_rules"], [None] * 14)
-        self.assertEqual([s["rule"] for s in self.slots().values() if s["rule"]], ["Leicht"])
-        self.assertEqual(self.slots("2026-W42")[(1, "dinner")]["rule"], None)  # a new week gets no stale rule
+    def test_the_rule_action_and_field_are_gone(self):
+        with self.assertRaises(db.InvalidField) as cm:
+            plans.slot_action(self.conn, WEEK, 0, "lunch", {"action": "rule", "tag_id": None}, self.settings, random.Random(1), MONDAY)
+        self.assertEqual(cm.exception.field, "action")
+        self.assertTrue(all("rule" not in s for s in plans.view(self.conn, WEEK, self.settings, MONDAY)["slots"]))
+        self.assertNotIn("slot_rules", self.settings)
+        self.assertNotIn("rule_tag_id", [r["name"] for r in self.conn.execute("PRAGMA table_info(plan_slots)")])
 
 
 class LeftoverTest(unittest.TestCase):
@@ -522,12 +483,6 @@ class LeftoverTest(unittest.TestCase):
             out = gen(self.plan(locked=False), [recipe(1), recipe(2), recipe(3)], seed=seed)
             self.assertEqual(slot(out, 1, "lunch")["recipe_id"], slot(out, 0, "dinner")["recipe_id"])
             self.assertNotEqual(slot(out, 1, "dinner")["recipe_id"], slot(out, 0, "dinner")["recipe_id"])
-
-    def test_the_rule_of_a_leftover_slot_is_ignored(self):
-        plan = self.plan()
-        slot(plan["slots"], 1, "lunch")["rule"] = "Schnell"
-        out = gen(plan, [recipe(1), recipe(2, tags=["Schnell"])])
-        self.assertEqual((slot(out, 1, "lunch")["recipe_id"], slot(out, 1, "lunch")["reason"]), (1, None))
 
     def test_reroll_of_the_source_moves_the_leftover_along_and_a_leftover_is_not_rerolled(self):
         plan = self.plan(locked=False)

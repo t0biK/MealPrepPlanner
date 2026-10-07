@@ -174,9 +174,14 @@ def validate_draft(obj, tag_names, images_dir=None):
 
 # ---- tags ----
 
+def _slots(stored):
+    """A tag's 14 slot flags (index = day * 2 + 0 lunch / 1 dinner); NULL = all slots."""
+    return json.loads(stored) if stored else [True] * 14
+
+
 def list_tags(conn):
-    rows = conn.execute("SELECT id, name, category FROM tags").fetchall()
-    return sorted(({"id": r["id"], "name": r["name"], "category": bool(r["category"])} for r in rows),
+    rows = conn.execute("SELECT id, name, category, slots FROM tags").fetchall()
+    return sorted(({"id": r["id"], "name": r["name"], "category": bool(r["category"]), "slots": _slots(r["slots"])} for r in rows),
                   key=lambda t: sort_key(t["name"]))
 
 
@@ -213,23 +218,24 @@ def create_tag(conn, name):
         if conn.execute("SELECT 1 FROM tags WHERE name = ?", (name,)).fetchone():
             raise db.InvalidField("name")
         tag_id = conn.execute("INSERT INTO tags (name) VALUES (?)", (name,)).lastrowid
-    return {"id": tag_id, "name": name, "category": False}
+    return {"id": tag_id, "name": name, "category": False, "slots": _slots(None)}
 
 
-def update_tag(conn, tag_id, name, category):
-    """Rename a tag and set whether it is a category. Returns the tag, or None if it does not exist.
-    A tag that stops being a category is no slot rule any more."""
+def update_tag(conn, tag_id, name, category, slots):
+    """Rename a tag, set whether it is a category and its 14 slot flags (where the planner may put its recipes; they only
+    count while it is a category). Returns the tag, or None if it does not exist."""
     name = _tag_name(name)
     if not isinstance(category, bool):
         raise db.InvalidField("category")
+    if not isinstance(slots, list) or len(slots) != 14 or not all(isinstance(v, bool) for v in slots):
+        raise db.InvalidField("slots")
     with conn:
         if conn.execute("SELECT 1 FROM tags WHERE name = ? AND id != ?", (name, tag_id)).fetchone():
             raise db.InvalidField("name")
-        if conn.execute("UPDATE tags SET name = ?, category = ? WHERE id = ?", (name, int(category), tag_id)).rowcount == 0:
+        if conn.execute("UPDATE tags SET name = ?, category = ?, slots = ? WHERE id = ?",
+                        (name, int(category), None if all(slots) else json.dumps(slots), tag_id)).rowcount == 0:
             return None
-        if not category:
-            conn.execute("UPDATE plan_slots SET rule_tag_id = NULL WHERE rule_tag_id = ?", (tag_id,))
-    return {"id": tag_id, "name": name, "category": category}
+    return {"id": tag_id, "name": name, "category": category, "slots": slots}
 
 
 def delete_tag(conn, tag_id):
@@ -439,8 +445,11 @@ def rating_info(conn, recipe_id, user_id):
 # ---- planning (M7) ----
 
 def planning_recipes(conn):
-    """What the planner needs of every recipe: id, meal suitability, archived flag, tags, kcal per portion (or None)."""
+    """What the planner needs of every recipe: id, meal suitability, archived flag, tags, kcal per portion (or None) and the
+    slots its categories allow (14 bools, all true without categories)."""
     tags = _tag_map(conn)
+    masks = {r["name"]: _slots(r["slots"]) for r in conn.execute("SELECT name, slots FROM tags WHERE category = 1")}
     return [{"id": r["id"], "for_lunch": bool(r["for_lunch"]), "for_dinner": bool(r["for_dinner"]),
-             "archived": bool(r["archived"]), "tags": tags.get(r["id"], []), "kcal": r["kcal"]}
+             "archived": bool(r["archived"]), "tags": tags.get(r["id"], []), "kcal": r["kcal"],
+             "slots": [all(masks[t][i] for t in tags.get(r["id"], []) if t in masks) for i in range(14)]}
             for r in conn.execute("SELECT id, for_lunch, for_dinner, archived, kcal FROM recipes ORDER BY id")]

@@ -241,10 +241,7 @@
   "today.canteen": "Kantine",
   "recipes.all_categories": "Alle Kategorien",
   "settings.category": "Kategorie",
-  "settings.slot_rules": "Kategorie pro Mahlzeit",
-  "settings.slot_rules_hint": "Optional: Die Mahlzeit bekommt bevorzugt Rezepte dieser Kategorie, z. B. Mo–Fr Abend = Schnell. Gibt es keins, wird ein beliebiges Rezept genommen.",
-  "plan.rule": "Kategorie",
-  "plan.rule_unmet": "Kategorie nicht erfüllt",
+  "settings.tag_slots_hint": "Ein Haken erlaubt der Kategorie diese Mahlzeit: nur dort setzt „Vorschlag erstellen“ ihre Rezepte ein. Hat ein Rezept mehrere Kategorien, müssen alle die Mahlzeit erlauben. Von Hand geht jedes Rezept überallhin.",
   "plan.leftover": "Reste von …",
   "plan.leftover_of": "Reste von {slot}",
   "today.leftover": "Reste"

@@ -241,10 +241,7 @@
   "today.canteen": "Canteen",
   "recipes.all_categories": "All categories",
   "settings.category": "Category",
-  "settings.slot_rules": "Category per meal",
-  "settings.slot_rules_hint": "Optional: the meal prefers recipes of this category, e.g. Mon–Fri dinner = Schnell. If there is none, any recipe is used.",
-  "plan.rule": "Category",
-  "plan.rule_unmet": "Category not met",
+  "settings.tag_slots_hint": "A tick lets the category use that meal: “Create suggestion” only puts its recipes there. A recipe with several categories needs all of them to allow the meal. By hand, any recipe can go anywhere.",
   "plan.leftover": "Leftovers from …",
   "plan.leftover_of": "Leftovers from {slot}",
   "today.leftover": "Leftovers"

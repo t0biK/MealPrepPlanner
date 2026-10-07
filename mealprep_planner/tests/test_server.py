@@ -500,44 +500,39 @@ class DevServerTest(unittest.TestCase):
         status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})
         self.assertEqual(status, 201)
         self.assertEqual(self.call("POST", "/api/tags", {"name": "servertag"})[1]["field"], "name")
-        self.assertEqual(self.call("PUT", f"/api/tags/{tag['id']}", {"name": "Renamed", "category": False})[1]["name"], "Renamed")
+        self.assertEqual(self.call("PUT", f"/api/tags/{tag['id']}", {"name": "Renamed", "category": False, "slots": [True] * 14})[1]["name"], "Renamed")
         self.assertIn("Renamed", [t["name"] for t in self.call("GET", "/api/tags")[1]])
         self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 200)
         self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 404)
-        self.assertEqual(self.call("PUT", "/api/tags/999999", {"name": "x", "category": False})[0], 404)
+        self.assertEqual(self.call("PUT", "/api/tags/999999", {"name": "x", "category": False, "slots": [True] * 14})[0], 404)
 
-    def test_tag_category_and_slot_rules(self):
+    def test_tag_category_and_slots(self):
         tags = {t["name"]: t for t in self.call("GET", "/api/tags")[1]}
         self.assertEqual({n for n, t in tags.items() if t["category"]},
                          {"Schnell", "Meal Prep", "Sonntagsessen", "Leicht", "Proteinreich", "Lunchbox", "Ofengericht", "Gäste"})
-        quick, plain = tags["Schnell"]["id"], tags["Nudeln"]["id"]
-        self.assertFalse(self.call("POST", "/api/tags", {"name": "RuleTag"})[1]["category"])
+        quick = tags["Schnell"]["id"]
+        self.assertFalse(self.call("POST", "/api/tags", {"name": "SlotTag"})[1]["category"])
         for body in ({"name": "Schnell"}, {"name": "Schnell", "category": 1}, {"name": "Schnell", "category": None}):
             self.assertEqual(self.call("PUT", f"/api/tags/{quick}", body), (400, {"error": "invalid_field", "field": "category"}))
 
-        week = "2030-W20"
-        slot = lambda body, day=0: self.call("POST", f"/api/plans/{week}/slots/{day}/dinner", body)
-        status, plan = slot({"action": "rule", "tag_id": quick})
-        self.assertEqual((status, self.plan_slot(plan, 0, "dinner")["rule"], self.plan_slot(plan, 0, "lunch")["rule"]), (200, "Schnell", None))
-        for bad in (plain, 999999, "1", True):  # only category tags
-            self.assertEqual(slot({"action": "rule", "tag_id": bad}), (400, {"error": "invalid_field", "field": "tag_id"}))
-        self.assertEqual(slot({"action": "rule"})[1]["slots"][1]["rule"], None)  # no tag_id = no rule
-        slot({"action": "rule", "tag_id": quick})
-
-        rules = [quick if i == 3 else None for i in range(14)]
-        self.assertEqual(self.call("PUT", "/api/settings", {"slot_rules": rules})[1]["slot_rules"], rules)
+        all_slots = [True] * 14
+        self.assertEqual(self.call("GET", "/api/tags")[1][0]["slots"], all_slots)  # NULL reads as all slots
+        dinners = [i % 2 == 1 for i in range(14)]
+        for bad in (None, all_slots[:13], all_slots + [True], [1] * 14, "x" * 14):
+            self.assertEqual(self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True, "slots": bad}),
+                             (400, {"error": "invalid_field", "field": "slots"}))
         try:
-            for bad in (rules[:13], [plain] + [None] * 13, ["x"] * 14, [True] + [None] * 13, "no"):
-                self.assertEqual(self.call("PUT", "/api/settings", {"slot_rules": bad}), (400, {"error": "invalid_field", "field": "slot_rules"}))
-            new = self.call("GET", "/api/plans/2030-W21")[1]  # a new week copies the rules
-            self.assertEqual([s["rule"] for s in new["slots"]], ["Schnell" if i == 3 else None for i in range(14)])
-            self.assertEqual(self.call("GET", "/api/settings")[1]["slot_rules"], rules)  # a rule changed in a week is local to it
-            self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": False})  # no category, no rule
-            self.assertEqual(self.call("GET", "/api/settings")[1]["slot_rules"], [None] * 14)
-            self.assertIsNone(self.plan_slot(self.call("GET", f"/api/plans/{week}")[1], 0, "dinner")["rule"])
+            self.assertEqual(self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True, "slots": dinners})[1]["slots"], dinners)
+            self.assertEqual(next(t for t in self.call("GET", "/api/tags")[1] if t["id"] == quick)["slots"], dinners)
         finally:
-            self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True})
-            self.call("PUT", "/api/settings", {"slot_rules": [None] * 14})
+            self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True, "slots": all_slots})
+
+        # the M13 slot rules are gone
+        self.assertEqual(self.call("POST", "/api/plans/2030-W20/slots/0/dinner", {"action": "rule", "tag_id": quick}),
+                         (400, {"error": "invalid_field", "field": "action"}))
+        self.assertEqual(self.call("PUT", "/api/settings", {"slot_rules": [None] * 14}), (400, {"error": "invalid_field", "field": "slot_rules"}))
+        self.assertNotIn("slot_rules", self.call("GET", "/api/settings")[1])
+        self.assertNotIn("rule", self.plan_slot(self.call("GET", "/api/plans/2030-W20")[1], 0, "dinner"))
 
     def test_parse_ingredients_and_units(self):
         status, parsed = self.call("POST", "/api/parse-ingredients", {"text": "500 g Mehl\n2 Eier"})

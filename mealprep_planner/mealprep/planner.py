@@ -1,8 +1,8 @@
 """Taste prediction (M6) and week planning (M7): pure functions on plain data (history() is the only DB read).
 
 ratings: {user_id: {recipe_id: stars 0-5}}   tags: {recipe_id: [tag names]}   users: [user_id]
-recipes: [{id, for_lunch, for_dinner, archived, tags, kcal}]   history: [(recipe_id, date)]
-slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason, rule (category tag name | None), leftover ((day, meal) of the source | None)}   plan: {week, slots: [slot x 14], canteen}
+recipes: [{id, for_lunch, for_dinner, archived, tags, kcal, slots}]   (slots: 14 bools, index = day * 2 + 0 lunch / 1 dinner, absent = all)   history: [(recipe_id, date)]
+slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason, leftover ((day, meal) of the source | None)}   plan: {week, slots: [slot x 14], canteen}
 M14: a leftover slot has no recipe of its own; its recipe_id is its source's (resolve_leftovers), so every function below sees what is eaten.
 M12: people: {user_id: {kcal_target, protein_target_g, canteen_kcal}}   canteen: {day: [user_id]}   nutrition: {recipe_id: {kcal, ...} | None}
 dated slot (sensor_payload): {date, meal, title}
@@ -80,6 +80,7 @@ def is_vetoed(model, recipe_id):
 
 WEEK_RE = re.compile(r"\d{4}-W\d{2}", re.ASCII)
 MEALS = ("lunch", "dinner")
+ALL_SLOTS = [True] * 14
 TEMPERATURE = 0.5  # weight = exp((score - best) / TEMPERATURE)
 
 
@@ -124,27 +125,22 @@ def top_tags(model, recipe_id, n=3):
     return sorted(model["tags"].get(recipe_id, ()), key=lambda t: (-affinity(t), t))[:n]
 
 
-def _reason(model, recipe_id, cooked, fit_label=None, rule=None):
-    """Suggestion reason (section 6): rated, predicted (cooked before) or new; `rule` is the slot's category and `rule_met`
-    whether the recipe has it; `fit` only when an eater has a target."""
+def _reason(model, recipe_id, cooked, fit_label=None):
+    """Suggestion reason (section 6): rated, predicted (cooked before) or new; `fit` only when an eater has a target."""
     kind = "rated" if _is_rated(model, recipe_id) else "predicted" if recipe_id in cooked else "new"
     return {"kind": kind, "score": round(household_score(model, recipe_id)[0], 1), "tags": top_tags(model, recipe_id),
-            "rule": rule, "rule_met": rule is None or rule in model["tags"].get(recipe_id, ()),
             **({"fit": fit_label} if fit_label else {})}
 
 
 def _candidates(slot, dates, recipes, model, history, used, window):
     """Recipe ids that may fill the slot: not archived, matching meal, not vetoed, not used this week, not cooked recently,
-    and with the slot's category if any recipe qualifies (otherwise the rule is dropped for this slot)."""
+    and allowed in this slot by all of its categories (M15)."""
     suits = "for_lunch" if slot["meal"] == "lunch" else "for_dinner"
     day = dates[slot["day"]]
+    index = slot["day"] * 2 + MEALS.index(slot["meal"])
     recent = {rid for rid, d in history if abs((d - day).days) < window}
-    pool = sorted(r["id"] for r in recipes if not r["archived"] and r[suits] and r["id"] not in used
-                  and r["id"] not in recent and not is_vetoed(model, r["id"]))
-    rule = slot.get("rule")
-    if rule:
-        pool = [rid for rid in pool if rule in model["tags"].get(rid, ())] or pool
-    return pool
+    return sorted(r["id"] for r in recipes if not r["archived"] and r[suits] and r.get("slots", ALL_SLOTS)[index]
+                  and r["id"] not in used and r["id"] not in recent and not is_vetoed(model, r["id"]))
 
 
 def _pick(pool, model, rng, misfit):
@@ -176,7 +172,7 @@ def _fill(slot, pool, slots, plan, kcal, model, cooked, rng, people):
     """Pick a recipe of the pool for the slot, weighted by score minus the calorie misfit; sets recipe_id and reason."""
     fits = {rid: fit(slots, slot, kcal.get(rid), people, plan.get("canteen", {})) for rid in pool}
     slot["recipe_id"] = _pick(pool, model, rng, {rid: f[1] for rid, f in fits.items()})
-    slot["reason"] = _reason(model, slot["recipe_id"], cooked, fits[slot["recipe_id"]][0], slot.get("rule"))
+    slot["reason"] = _reason(model, slot["recipe_id"], cooked, fits[slot["recipe_id"]][0])
 
 
 def generate(plan, recipes, ratings, users, history, settings, rng, today, people=None):

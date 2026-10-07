@@ -335,7 +335,7 @@ def api_create_tag(h, m):
 
 def api_update_tag(h, m):
     body = _body_dict(h)
-    tag = recipes.update_tag(h.conn, int(m.group(1)), body.get("name"), body.get("category"))
+    tag = recipes.update_tag(h.conn, int(m.group(1)), body.get("name"), body.get("category"), body.get("slots"))
     if tag is None:
         raise ApiError(404, "not_found")
     h.send_json(200, tag)

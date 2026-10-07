@@ -36,7 +36,7 @@ class DbTest(unittest.TestCase):
     def test_settings_defaults(self):
         self.assertEqual(db.get_settings(self.conn), {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2,
                                                       "inbox_entity": None, "slot_pattern": [True] * 14, "repeat_window_days": 14,
-                                                      "new_per_week": 2, "slot_rules": [None] * 14})
+                                                      "new_per_week": 2})
 
     def test_invalid_values_rejected(self):
         for patch, field in [
@@ -142,10 +142,6 @@ class DbTest(unittest.TestCase):
                 self.assertEqual({n.casefold() for n in flagged}, {c.casefold() for c in categories})
                 self.assertEqual(len(flagged), 8)
                 self.assertIn("MEAL PREP", names)  # kept as it was
-                tag_id = conn.execute("SELECT id FROM tags WHERE name = 'Schnell'").fetchone()[0]
-                conn.execute("UPDATE plan_slots SET rule_tag_id = ?", (tag_id,))
-                conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))  # ON DELETE SET NULL
-                self.assertIsNone(conn.execute("SELECT rule_tag_id FROM plan_slots").fetchone()[0])
             finally:
                 conn.close()
 
@@ -166,22 +162,34 @@ class DbTest(unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_slot_rules_setting(self):
-        ids = {r["name"]: r["id"] for r in self.conn.execute("SELECT id, name FROM tags")}
-        rules = [ids["Schnell"] if i in (1, 3) else ids["Leicht"] if i == 5 else None for i in range(14)]
-        self.assertEqual(db.set_settings(self.conn, {"slot_rules": rules})["slot_rules"], rules)
-        self.assertEqual(db.set_settings(self.conn, {"slot_rules": [None] * 14})["slot_rules"], [None] * 14)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM settings WHERE key = 'slot_rules'").fetchone()[0], 0)  # default: not stored
-        for bad in ([None] * 13, [None] * 15, [ids["Nudeln"]] + [None] * 13, [99999] + [None] * 13, [True] + [None] * 13,
-                    [str(ids["Schnell"])] + [None] * 13, [float(ids["Schnell"])] + [None] * 13, "x", None):
-            with self.assertRaises(db.InvalidField, msg=bad) as cm:
-                db.set_settings(self.conn, {"slot_rules": bad})
-            self.assertEqual(cm.exception.field, "slot_rules")
-        db.set_settings(self.conn, {"slot_rules": rules})
-        self.conn.execute("DELETE FROM tags WHERE name = 'Schnell'")  # a deleted tag reads as no rule
-        self.assertEqual(db.get_settings(self.conn)["slot_rules"], [ids["Leicht"] if i == 5 else None for i in range(14)])
-        db.get_settings(self.conn)["slot_rules"][0] = 1  # defaults are not shared between callers
-        self.assertEqual(db.get_settings(self.conn)["slot_rules"][0], None)
+    def test_migration_11_on_a_db_at_version_10(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.connect(tmp)
+            try:
+                for n, script in enumerate(db.MIGRATIONS[:10], start=1):  # the database as shipped with M14
+                    conn.executescript(f"BEGIN; {script} PRAGMA user_version = {n}; COMMIT;")
+                with conn:
+                    tag_id = conn.execute("SELECT id FROM tags WHERE name = 'Schnell'").fetchone()[0]
+                    conn.execute("INSERT INTO users (id, name, display_name, first_seen, last_seen) VALUES ('a', 'a', 'A', 'x', 'x')")
+                    conn.execute("INSERT INTO recipes (id, title, source_kind, servings, created_at, updated_at) VALUES (1, 'r', 'manual', 2, 'x', 'x')")
+                    conn.execute("INSERT INTO plans (week, status) VALUES ('2026-W41', 'draft')")
+                    conn.execute("INSERT INTO plan_slots (week, day, meal, active, recipe_id, guests, locked, skipped, reason, rule_tag_id, leftover_day, leftover_meal) "
+                                 "VALUES ('2026-W41', 0, 'dinner', 1, 1, 2, 1, 0, '{\"kind\": \"manual\"}', ?, NULL, NULL)", (tag_id,))
+                    conn.execute("INSERT INTO plan_slots (week, day, meal, active, leftover_day, leftover_meal) VALUES ('2026-W41', 1, 'lunch', 1, 0, 'dinner')")
+                    conn.execute("INSERT INTO slot_eaters (week, day, meal, user_id) VALUES ('2026-W41', 0, 'dinner', 'a')")
+                    conn.execute("INSERT INTO settings (key, value) VALUES ('slot_rules', ?), ('new_per_week', '3')", (f"[{tag_id}{', null' * 13}]",))
+                db.migrate(conn)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], len(db.MIGRATIONS))
+                self.assertNotIn("rule_tag_id", [r["name"] for r in conn.execute("PRAGMA table_info(plan_slots)")])
+                self.assertEqual([r["key"] for r in conn.execute("SELECT key FROM settings")], ["new_per_week"])  # slot_rules deleted
+                self.assertEqual(db.get_settings(conn)["new_per_week"], 3)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM tags WHERE slots IS NOT NULL").fetchone()[0], 0)  # categories allow all slots
+                self.assertEqual([tuple(r) for r in conn.execute("SELECT day, meal, recipe_id, guests, locked, reason, leftover_day, leftover_meal FROM plan_slots ORDER BY day")],
+                                 [(0, "dinner", 1, 2, 1, '{"kind": "manual"}', None, None), (1, "lunch", None, 0, 0, None, 0, "dinner")])  # data kept
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM slot_eaters").fetchone()[0], 1)
+                self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+            finally:
+                conn.close()
 
     def test_household_validation(self):
         db.upsert_user(self.conn, {"id": "u1", "name": "n", "display_name": "B"})

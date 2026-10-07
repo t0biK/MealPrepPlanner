@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from . import db, planner, recipes
 
-ACTIONS = ("reroll", "set", "clear", "lock", "unlock", "activate", "deactivate", "eater", "guests", "rule", "leftover", "skip", "unskip")
+ACTIONS = ("reroll", "set", "clear", "lock", "unlock", "activate", "deactivate", "eater", "guests", "leftover", "skip", "unskip")
 
 
 class Refused(Exception):
@@ -38,14 +38,14 @@ def recipe_nutrition(conn, ids):
 
 
 def load_plan(conn, week, settings):
-    """The stored plan; a missing week is created as a draft from the slot pattern and slot rules. Every participant gets
+    """The stored plan; a missing week is created as a draft from the slot pattern. Every participant gets
     the canteen on their default weekdays (and is then not on that day's lunch)."""
     with conn:
         if conn.execute("SELECT 1 FROM plans WHERE week = ?", (week,)).fetchone() is None:
             conn.execute("INSERT INTO plans (week, status) VALUES (?, 'draft')", (week,))
             conn.executemany(
-                "INSERT INTO plan_slots (week, day, meal, active, rule_tag_id) VALUES (?, ?, ?, ?, ?)",
-                [(week, i // 2, planner.MEALS[i % 2], int(on), settings["slot_rules"][i]) for i, on in enumerate(settings["slot_pattern"])])
+                "INSERT INTO plan_slots (week, day, meal, active) VALUES (?, ?, ?, ?)",
+                [(week, i // 2, planner.MEALS[i % 2], int(on)) for i, on in enumerate(settings["slot_pattern"])])
             canteen = {r["id"]: json.loads(r["canteen_days"]) for r in conn.execute("SELECT id, canteen_days FROM users WHERE eats = 1")}
             conn.executemany("INSERT INTO plan_canteen (week, day, user_id) VALUES (?, ?, ?)",
                              [(week, d, u) for u, days in canteen.items() for d in days])
@@ -72,11 +72,10 @@ def read_plan(conn, week):
     plan["slots"] = [
         {"day": r["day"], "meal": r["meal"], "active": bool(r["active"]), "recipe_id": r["recipe_id"],
          "eaters": slot_eaters.get((r["day"], r["meal"]), []), "guests": r["guests"],
-         "locked": bool(r["locked"]), "skipped": bool(r["skipped"]), "rule": r["rule"],
+         "locked": bool(r["locked"]), "skipped": bool(r["skipped"]),
          "leftover": None if r["leftover_day"] is None else (r["leftover_day"], r["leftover_meal"]),
          "reason": json.loads(r["reason"]) if r["reason"] else None}
-        for r in conn.execute("SELECT plan_slots.*, tags.name AS rule FROM plan_slots LEFT JOIN tags ON tags.id = rule_tag_id "
-                              "WHERE week = ? ORDER BY day, meal = 'dinner'", (week,))]
+        for r in conn.execute("SELECT * FROM plan_slots WHERE week = ? ORDER BY day, meal = 'dinner'", (week,))]
     plan["slots"] = planner.resolve_leftovers(plan["slots"])
     return plan
 
@@ -85,10 +84,10 @@ def _store(conn, week, slots):
     with conn:
         conn.executemany(
             "UPDATE plan_slots SET active = ?, recipe_id = ?, guests = ?, locked = ?, skipped = ?, reason = ?, "
-            "rule_tag_id = (SELECT id FROM tags WHERE name = ?), leftover_day = ?, leftover_meal = ? "
+            "leftover_day = ?, leftover_meal = ? "
             "WHERE week = ? AND day = ? AND meal = ?",
             [(int(s["active"]), None if s["leftover"] else s["recipe_id"], s["guests"], int(s["locked"]), int(s["skipped"]),
-              json.dumps(s["reason"]) if s["reason"] else None, s["rule"], *(s["leftover"] or (None, None)),
+              json.dumps(s["reason"]) if s["reason"] else None, *(s["leftover"] or (None, None)),
               week, s["day"], s["meal"]) for s in slots])
         conn.execute("DELETE FROM slot_eaters WHERE week = ?", (week,))
         conn.executemany("INSERT INTO slot_eaters (week, day, meal, user_id) VALUES (?, ?, ?, ?)",
@@ -126,7 +125,7 @@ def view(conn, week, settings, today):
         "dates": [d.isoformat() for d in dates],
         "slots": [{"day": s["day"], "meal": s["meal"], "date": dates[s["day"]].isoformat(), "active": s["active"],
                    "recipe": info.get(s["recipe_id"]), "locked": s["locked"], "skipped": s["skipped"], "reason": s["reason"],
-                   "rule": s["rule"], "leftover": s["leftover"] and dict(zip(("day", "meal"), s["leftover"])),
+                   "leftover": s["leftover"] and dict(zip(("day", "meal"), s["leftover"])),
                    "eaters": sorted(({"user_id": u, "display_name": names[u]} for u in s["eaters"]),
                                     key=lambda p: (p["display_name"].casefold(), p["user_id"])),
                    "portions_by_user": {u: factors.get((u, s["day"]), 1.0) for u in s["eaters"]},
@@ -211,12 +210,6 @@ def slot_action(conn, week, day, meal, body, settings, rng, today):
             if not slot["active"] or any(s["leftover"] == (day, meal) for s in slots):  # a source cannot be a leftover itself
                 raise Refused(action)
             slot.update(leftover=(from_day, from_meal), recipe_id=source["recipe_id"], reason=None, locked=False)
-    elif action == "rule":
-        tag_id = body.get("tag_id")
-        row = conn.execute("SELECT name FROM tags WHERE id = ? AND category = 1", (tag_id,)).fetchone() if _int(tag_id) else None
-        if tag_id is not None and row is None:
-            raise db.InvalidField("tag_id")
-        slot["rule"] = row["name"] if row else None
     else:  # skip / unskip
         if plan["status"] != "confirmed" or planner.week_dates(week)[day] > today:
             raise Refused(action)

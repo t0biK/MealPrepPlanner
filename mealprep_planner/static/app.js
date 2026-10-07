@@ -48,6 +48,25 @@ function option(value, label, selected) {
   return el("option", { value, textContent: label, selected });
 }
 
+const dayName = (day, weekday) => new Date(2024, 0, 1 + day).toLocaleDateString(document.documentElement.lang, { weekday });
+
+// 7 x 2 grid of checkboxes (index = day * 2 + 0 lunch / 1 dinner): meals of a new week, slots a category allows
+function slotGrid(values, onChange, labelPrefix = "") {
+  return el("div", { className: "pattern" }, el("span"),
+    ...[0, 1, 2, 3, 4, 5, 6].map((day) => el("span", { textContent: dayName(day, "short") })),
+    ...["form.lunch", "form.dinner"].flatMap((meal, m) => [
+      el("span", { textContent: t(meal) }),
+      ...[0, 1, 2, 3, 4, 5, 6].map((day) => {
+        const box = el("input", { type: "checkbox", checked: values[day * 2 + m],
+          ariaLabel: labelPrefix + t("plan.slot_label", { day: dayName(day, "long"), meal: t(meal) }) });
+        box.onchange = () => {
+          values[day * 2 + m] = box.checked;
+          onChange(values);
+        };
+        return box;
+      })]));
+}
+
 function card(title, ...children) {
   return el("section", { className: "card" }, ...(title ? [el("h2", { textContent: title })] : []), ...children);
 }
@@ -124,39 +143,8 @@ async function pageSettings(app) {
     return input;
   };
 
-  // 7 x 2 grid: which meals a new week plans by default (index = day * 2 + 0 lunch / 1 dinner)
-  const pattern = [...settings.slot_pattern];
-  const dayName = (day, weekday) => new Date(2024, 0, 1 + day).toLocaleDateString(document.documentElement.lang, { weekday });
-  const patternGrid = el("div", { className: "pattern" }, el("span"),
-    ...[0, 1, 2, 3, 4, 5, 6].map((day) => el("span", { textContent: dayName(day, "short") })),
-    ...["form.lunch", "form.dinner"].flatMap((meal, m) => [
-      el("span", { textContent: t(meal) }),
-      ...[0, 1, 2, 3, 4, 5, 6].map((day) => {
-        const box = el("input", { type: "checkbox", checked: pattern[day * 2 + m],
-          ariaLabel: t("plan.slot_label", { day: dayName(day, "long"), meal: t(meal) }) });
-        box.onchange = () => {
-          pattern[day * 2 + m] = box.checked;
-          save({ slot_pattern: pattern });
-        };
-        return box;
-      })]));
-
-  // category rule per meal (same layout as above): a new week starts from it, single weeks can change it
-  const rules = [...settings.slot_rules];
-  const categories = (await api("GET", "api/tags")).filter((x) => x.category);
-  const ruleGrid = el("div", { className: "rules" }, el("span"),
-    ...["form.lunch", "form.dinner"].map((meal) => el("strong", { textContent: t(meal) })),
-    ...[0, 1, 2, 3, 4, 5, 6].flatMap((day) => [el("span", { textContent: dayName(day, "short") }),
-      ...["form.lunch", "form.dinner"].map((meal, m) => {
-        const sel = el("select", { ariaLabel: t("plan.slot_label", { day: dayName(day, "long"), meal: t(meal) }) },
-          option("", t("settings.none"), rules[day * 2 + m] == null),
-          ...categories.map((x) => option(x.id, x.name, x.id === rules[day * 2 + m])));
-        sel.onchange = () => {
-          rules[day * 2 + m] = sel.value ? Number(sel.value) : null;
-          save({ slot_rules: rules });
-        };
-        return sel;
-      })]));
+  // which meals a new week plans by default
+  const patternGrid = slotGrid([...settings.slot_pattern], (pattern) => save({ slot_pattern: pattern }));
 
   // pantry: one name per line, never pushed to Bring!
   const pantry = el("textarea", { rows: 8, ariaLabel: t("settings.pantry") });
@@ -214,7 +202,6 @@ async function pageSettings(app) {
     card(t("settings.household"), household, el("p", { className: "muted", textContent: t("settings.household_hint") }),
       el("p", { className: "muted", textContent: t("settings.targets_hint") })),
     card(t("settings.slot_pattern"), patternGrid, el("p", { className: "muted", textContent: t("settings.slot_pattern_hint") })),
-    card(t("settings.slot_rules"), ruleGrid, el("p", { className: "muted", textContent: t("settings.slot_rules_hint") })),
     card(t("settings.repeat_window_days"), numberSetting("repeat_window_days", 0, 60)),
     card(t("settings.new_per_week"), numberSetting("new_per_week", 0, 14)),
     await tagEditor(),
@@ -715,12 +702,10 @@ function shiftWeek(week, n) {
 
 const parseDate = (iso) => new Date(...iso.split("-").map((v, i) => (i === 1 ? v - 1 : +v)));
 
-// `rule` = the slot's current category: a stored "not met" only counts for the rule it was generated with
-function reasonText(r, rule) {
+function reasonText(r) {
   if (!r) return "";
   const text = t(`plan.reason.${r.kind}`, { score: r.score == null ? "" : fmtScore(r.score) });
-  const parts = [text, ...(r.tags?.length ? [r.tags.join(", ")] : []), ...(r.fit === "poor" ? [t("plan.fit_poor")] : []),
-    ...(r.rule_met === false && r.rule === rule ? [t("plan.rule_unmet")] : [])];
+  const parts = [text, ...(r.tags?.length ? [r.tags.join(", ")] : []), ...(r.fit === "poor" ? [t("plan.fit_poor")] : [])];
   return parts.join(" · ");
 }
 
@@ -848,7 +833,6 @@ async function pageShopping(app, week) {
 async function pageWeek(app, week) {
   let plan = await api("GET", "api/plans/" + week);
   const household = await api("GET", "api/household");
-  const categories = (await api("GET", "api/tags")).filter((x) => x.category);
   const root = el("div");
   const act = async (path, body) => {
     try {
@@ -891,9 +875,6 @@ async function pageWeek(app, week) {
       }));
     const needsKcal = s.recipe && s.recipe.kcal == null && household.some((p) => p.kcal_target && eating.has(p.user_id));
     const past = plan.status === "confirmed" && s.date < plan.today;  // cooked: the server refuses reroll/set/clear
-    const ruleSel = el("select", { ariaLabel: t("plan.rule") }, option("", t("settings.none"), !s.rule),
-      ...categories.map((x) => option(x.id, x.name, x.name === s.rule)));
-    ruleSel.onchange = () => slotAct(s, { action: "rule", tag_id: ruleSel.value ? Number(ruleSel.value) : null });
     const skip = el("input", { type: "checkbox", checked: s.skipped });
     skip.onchange = () => slotAct(s, { action: skip.checked ? "skip" : "unskip" });
     // "Reste von …": any earlier active filled slot that is not a leftover itself (a source cannot be a leftover)
@@ -914,8 +895,7 @@ async function pageWeek(app, week) {
         el("div", { className: "stepper", role: "group", ariaLabel: t("plan.guests") }, minus, el("strong", { textContent: s.guests }), plus)),
       ...(s.recipe ? [...image(s.recipe.image), el("a", { href: "#/rezepte/" + s.recipe.id, textContent: s.recipe.title })]
         : [el("span", { className: "muted", textContent: t("plan.empty_slot") })]),
-      ...(s.leftover ? [] : [el("p", { className: "muted", textContent: reasonText(s.reason, s.rule) }),
-        el("label", { className: "row" }, el("span", { className: "muted", textContent: t("plan.rule") }), ruleSel)]),
+      ...(s.leftover ? [] : [el("p", { className: "muted", textContent: reasonText(s.reason) })]),
       ...(past || isSource || !(sources.length || s.leftover) ? []
         : [el("label", { className: "row" }, el("span", { className: "muted", textContent: t("plan.leftover") }), leftoverSel)]),
       ...(needsKcal ? [el("p", {}, el("a", { href: `#/rezepte/${s.recipe.id}/bearbeiten`, textContent: t("form.estimate") }))] : []),
@@ -1145,13 +1125,19 @@ async function tagEditor() {
     const rows = tags.map((x) => {
       const name = el("input", { type: "text", value: x.name, maxLength: 50, ariaLabel: x.name });
       const category = el("input", { type: "checkbox", checked: x.category });
-      name.onchange = category.onchange = async () => {
+      const slots = [...x.slots];
+      const put = async () => {
         try {
-          await api("PUT", "api/tags/" + x.id, { name: name.value, category: category.checked });
+          await api("PUT", "api/tags/" + x.id, { name: name.value, category: category.checked, slots });
           toast(t("settings.saved"));
+          return true;
         } catch (e) {
           toast(errorText(e));
+          return false;
         }
+      };
+      name.onchange = category.onchange = async () => {
+        await put();
         await refresh();
       };
       const del = el("button", { type: "button", className: "secondary", textContent: "✕", ariaLabel: t("settings.delete") });
@@ -1164,7 +1150,8 @@ async function tagEditor() {
         }
         await refresh();
       };
-      return el("div", { className: "tag-row" }, name, el("label", { className: "chip pick" }, category, t("settings.category")), del);
+      return el("div", {}, el("div", { className: "tag-row" }, name, el("label", { className: "chip pick" }, category, t("settings.category")), del),
+        ...(x.category ? [slotGrid(slots, async () => { if (!(await put())) await refresh(); }, x.name + ": ")] : []));
     });
     const fresh = el("input", { type: "text", maxLength: 50, placeholder: t("settings.tag_add"), ariaLabel: t("settings.tag_add") });
     const add = el("button", { type: "button", textContent: t("settings.add") });
@@ -1179,7 +1166,7 @@ async function tagEditor() {
     body.replaceChildren(...rows, el("div", { className: "tag-row" }, fresh, add));
   };
   await refresh();
-  return card(t("settings.tags"), body);
+  return card(t("settings.tags"), body, el("p", { className: "muted", textContent: t("settings.tag_slots_hint") }));
 }
 
 // hash route -> [nav tab, page function]

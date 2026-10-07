@@ -1055,7 +1055,7 @@ Goal: a category says where its recipes belong in the week (e.g. "Vesper" only f
 - [ ] A category "Vesper" with only the dinner slots ticked: "Vorschlag erstellen" never puts a Vesper recipe into a lunch (manual).
 - [ ] A recipe with two categories only appears in slots both allow (manual).
 - [ ] The settings and week view no longer show slot rules (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ## 10. Testing
 

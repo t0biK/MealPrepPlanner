@@ -667,7 +667,7 @@ ul.plain a {
   }
 }
 
-/* categories and slot rules (M13) */
+/* categories (M13) */
 .chip.cat {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
   font-weight: 600;
@@ -678,11 +678,8 @@ label.chip.pick.cat {
   font-weight: 600;
 }
 
-.rules {
-  display: grid;
-  grid-template-columns: auto 1fr 1fr;
-  gap: 0.5rem;
-  align-items: center;
+.tag-row + .pattern {
+  margin-bottom: 0.75rem;
 }
 
 .slot .row > select {
