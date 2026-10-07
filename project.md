@@ -14,6 +14,7 @@ MealPrep Planner is a Home Assistant App that turns the household's own recipe c
 - When a milestone's acceptance criteria are met, tick it here. Tick only what was really verified; if a part can't be verified yet (e.g. needs hardware), leave it unticked and note what is missing. Commit to local git after the user confirms.
 - Keep it simple: standard library and native platform features first. Add no dependency without asking. Build no speculative abstractions, no config for values that never change, no scaffolding "for later".
 - Validate everything at trust boundaries (imports, uploads, network input, AI/model output). Never trust it as is.
+- **Changelog for every update.** Every version bump (milestone or patch) adds an entry on top of `mealprep_planner/CHANGELOG.md`, which HA shows in the app's update dialog: a `## <version>` heading and 1–5 short bullets in plain language for the household — what changed for them, no file names, code terms or milestone numbers. Not done → the update is not finished (agreed 2026-10-07).
 
 ## 3. Decisions
 
@@ -601,6 +602,7 @@ MealPrepPlanner/                      git repo = HA app repository
 ├── blueprints/automation/mealprep_planner/
 │   └── share_to_inbox.yaml           M5
 └── mealprep_planner/                 the HA app (Docker build context)
+    ├── CHANGELOG.md                  shown by HA on updates; one entry per version (§2)
     ├── config.yaml                   M1
     ├── Dockerfile                    M1
     ├── mealprep/                     Python package, stdlib only
@@ -661,7 +663,7 @@ Scope change "Simple flow" (agreed 2026-10-07):
 
 - [ ] M16 Simplify: tags vs. categories, compact week, grouped settings
 
-Every milestone: bump `VERSION` (and from M1 `config.yaml`) to `0.<n>.0`; every new UI string goes into both `de.json` and `en.json`; all existing tests keep passing. "(manual)" marks checks done by hand, "(manual, HA)" on the HA device, "(manual, phone)" on a phone.
+Every milestone: bump `VERSION` (and from M1 `config.yaml`) to `0.<n>.0` and add its `CHANGELOG.md` entry (§2); every new UI string goes into both `de.json` and `en.json`; all existing tests keep passing. "(manual)" marks checks done by hand, "(manual, HA)" on the HA device, "(manual, phone)" on a phone.
 
 ### M0 – Runnable skeleton (local)
 
