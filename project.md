@@ -35,7 +35,7 @@ All decided in the planning session on 2026-10-06. Rows marked "(agreed 2026-10-
 | Learning | Transparent scoring: stars, per-person tag preferences that predict unrated recipes, a repeat window and a quota of new recipes. Every suggestion shows why it was picked. No implicit signals, no machine learning. |
 | Ratings | 0–5 stars. One current, editable rating per person and recipe. "Unrated" is not 0. A 0 from anyone is a veto: never suggested automatically, still plannable by hand. |
 | Rating prompt | "Wie war's?" list on the app's start page. No notifications. |
-| Planning rules | Repeat window (default 14 days, range 0–60) and new recipes per week (default 2, range 0–14), both in the settings. A category rule per slot in the slot pattern (e.g. Mo–Fr Abend = Schnell), changeable per week, falling back to any recipe when none matches (M13). Recipes whose kcal fit every eater's budget are preferred (M12). No weekly category quotas, no cooking-time limits, no hard calorie limits. (agreed 2026-10-06) |
+| Planning rules | Repeat window (default 14 days, range 0–60) and new recipes per week (default 2, range 0–14), both in the settings. From M15 every category has its own 7×2 slot grid (e.g. Vesper = only dinners, Sonntagsessen = only Sunday); the planner puts a recipe automatically only into slots that **all** of its categories allow (hard rule, like the Mittag/Abend flags; by hand it can go anywhere). This replaces the M13 slot rules ("Mo–Fr Abend = Schnell"), which are removed (agreed 2026-10-07). Recipes whose kcal fit every eater's budget are preferred (M12). No weekly category quotas, no cooking-time limits, no hard calorie limits. (agreed 2026-10-06) |
 | Portions | Cooked portions per slot = number of eaters + guests (M11), then the eaters' personal portions + guests + linked leftovers (M12, M14). Quantities are scaled from the recipe's servings. The setting "Portionen" (default 2, range 1–12) remains only as the servings fallback for imports without a yield. (agreed 2026-10-06) |
 | Household & eaters | Each HA user has "Ich esse mit" (default on); these are the participants. A new week puts all participants on every active slot; in the week view a tap on a name removes or re-adds that person for this slot. "+ Portion" adds guest portions (1 portion each). Household settings (participants, targets, canteen) are visible to and editable by every user (M11, M12). (agreed 2026-10-06) |
 | Calorie & protein targets | Each person can set a daily kcal target and a protein target (g). Both cover only the planned meals (lunch + dinner, including a canteen lunch); breakfast and snacks are not tracked. kcal drives personal portions and the planner; protein is display only (M12). (agreed 2026-10-06) |
@@ -47,7 +47,7 @@ All decided in the planning session on 2026-10-06. Rows marked "(agreed 2026-10-
 | Review | Every import becomes a draft that a person reviews and saves. Nothing enters the collection unreviewed. |
 | Steps | Ingredients, steps and source link are stored; the recipe page doubles as cook view. |
 | Images | Local copy of the recipe image / thumbnail, ≤ 2 MB, JPEG/PNG/WebP verified by magic bytes. |
-| Tags & categories | Curated, editable tag list (25 defaults, §6). Import and AI pre-select from it. From M13, eight tags are categories: Schnell, Meal Prep, Sonntagsessen, Leicht, Proteinreich, Lunchbox, Ofengericht, Gäste; they are shown as chips and can be used as slot rules. Schnell (≤ 30 min), Leicht (≤ 500 kcal per portion) and Proteinreich (≥ 25 % of kcal from protein) are pre-ticked automatically, the others by AI or by hand. (agreed 2026-10-06) |
+| Tags & categories | Curated, editable tag list (25 defaults, §6). Import and AI pre-select from it. From M13, eight tags are categories: Schnell, Meal Prep, Sonntagsessen, Leicht, Proteinreich, Lunchbox, Ofengericht, Gäste; they are shown as chips, a recipe can have several, and any tag can be made a category in the tag editor (e.g. "Vesper"). From M15 each category carries a slot grid that limits where the planner puts its recipes (agreed 2026-10-07). Schnell (≤ 30 min), Leicht (≤ 500 kcal per portion) and Proteinreich (≥ 25 % of kcal from protein) are pre-ticked automatically, the others by AI or by hand. (agreed 2026-10-06) |
 | Ingredient names | Free text with suggestions of already-used names (native `<datalist>`) in the edit form. Shopping merge = same name (case-insensitive) plus unit conversion g/kg and ml/cl/dl/l. |
 | Nutrition | kcal, protein, fat, carbs per portion: from the page, else an AI estimate ("geschätzt"). A "Nährwerte schätzen" button re-estimates any recipe; page values are overwritten only after confirming (M10). Shown per recipe and as day totals in the week view; with targets, per person and day against the targets (M12). (agreed 2026-10-06) |
 | Bulk import | Paste many links (one per line, max 50) → draft queue. |
@@ -341,6 +341,11 @@ ALTER TABLE plan_slots ADD COLUMN rule_tag_id INTEGER REFERENCES tags(id) ON DEL
 -- Migration 10 (M14)
 ALTER TABLE plan_slots ADD COLUMN leftover_day INTEGER;                 -- "Reste von": source slot
 ALTER TABLE plan_slots ADD COLUMN leftover_meal TEXT;
+
+-- Migration 11 (M15, agreed 2026-10-07)
+ALTER TABLE tags ADD COLUMN slots TEXT;    -- JSON 14 × bool (index = day × 2 + (0 lunch, 1 dinner)); NULL = all slots
+-- plan_slots.rule_tag_id removed (DROP COLUMN, or table rebuild if SQLite refuses because of its REFERENCES);
+DELETE FROM settings WHERE key = 'slot_rules';
 ```
 
 ### Recipe draft (format_version 1)
@@ -454,7 +459,7 @@ Parser rules (`ingredients.parse_line`), in this order:
 | `slot_pattern` | 14 × bool | all `true` | index = day × 2 + (0 lunch, 1 dinner) | M7 |
 | `repeat_window_days` | int | 14 | 0–60 | M7 |
 | `new_per_week` | int | 2 | 0–14 | M7 |
-| `slot_rules` | 14 × tag_id \| `null` | all `null` | each a category tag (index as `slot_pattern`); unknown ids read as `null` | M13 |
+| `slot_rules` | 14 × tag_id \| `null` | all `null` | each a category tag (index as `slot_pattern`); unknown ids read as `null`. **Removed in M15** (migration 11 deletes the stored value) | M13 |
 
 Defaults live in code; the table stores only changed values.
 
@@ -481,7 +486,7 @@ Per-person values live in the `users` table:
 {"kind": "predicted", "score": 3.9, "tags": ["Nudeln", "Italienisch"]}
 ```
 
-`kind`: `rated` (at least one rating), `predicted` (no rating, cooked before), `new` (no rating, never cooked), `manual` (set by hand), `none` (no candidate). `score` = household score (1 decimal). `tags` = up to 3 recipe tags with the highest affinity for the household. M13 adds `rule` (the slot's category or `null`) and `rule_met` (`false` when the planner had to fall back to any recipe); M12 adds `fit`: `ok`, `poor` (some eater would need a factor outside 0.75–1.5) or `unknown` (recipe without kcal). The frontend turns this into text via i18n.
+`kind`: `rated` (at least one rating), `predicted` (no rating, cooked before), `new` (no rating, never cooked), `manual` (set by hand), `none` (no candidate). `score` = household score (1 decimal). `tags` = up to 3 recipe tags with the highest affinity for the household. M13 adds `rule` (the slot's category or `null`) and `rule_met` (`false` when the planner had to fall back to any recipe), both removed again in M15; M12 adds `fit`: `ok`, `poor` (some eater would need a factor outside 0.75–1.5) or `unknown` (recipe without kcal). The frontend turns this into text via i18n.
 
 ### Sensor payload (M9)
 
@@ -647,6 +652,10 @@ Scope change "Weight Loss Journey" (agreed 2026-10-06):
 - [ ] M12 Weight loss: targets, canteen and personal portions
 - [ ] M13 Categories and slot rules
 - [ ] M14 Leftovers ("Reste von …")
+
+Scope change "Category slots" (agreed 2026-10-07):
+
+- [ ] M15 Category slots (replaces the M13 slot rules)
 
 Every milestone: bump `VERSION` (and from M1 `config.yaml`) to `0.<n>.0`; every new UI string goes into both `de.json` and `en.json`; all existing tests keep passing. "(manual)" marks checks done by hand, "(manual, HA)" on the HA device, "(manual, phone)" on a phone.
 
@@ -1023,6 +1032,30 @@ Goal: nothing reaches Bring! unless a person ticks it; Chefkoch-style Bring! imp
 - [ ] "Di Mittag = Reste von Mo Abend" shows the same recipe on Tuesday, raises Monday's cooked portions and adds nothing extra to the checklist (manual).
 - [ ] "Vorschlag erstellen" leaves leftover slots alone (manual).
 - [x] All tests pass.
+
+### M15 – Category slots (agreed 2026-10-07)
+
+Goal: a category says where its recipes belong in the week (e.g. "Vesper" only for dinner, "Sonntagsessen" only on Sunday), instead of a slot demanding a category. Replaces the M13 slot rules.
+
+**Build**
+- Migration 11 (§6): `tags.slots` (JSON 14 × bool, `NULL` = all slots; existing categories start with `NULL`); `plan_slots.rule_tag_id` removed; stored `slot_rules` setting deleted.
+- `recipes.py`: tags carry `slots` (14 bools; `NULL` is returned as all `true`); `update_tag(id, name, category, slots)` validates `slots` as a list of exactly 14 bools (else 400 `invalid_field` `slots`); `slots` only matters while `category = 1`. `planning_recipes` returns per recipe its allowed slot mask = AND over the `slots` of all its category tags (all `true` without categories).
+- `planner.py`: candidate rule (§9 M7 step 2) gets one more condition: the recipe's allowed slot mask is `true` at `day × 2 + meal` of the slot. Applies to `generate` and `reroll`; `set` (manual) ignores it, as it ignores the Mittag/Abend flags. No candidate → slot stays empty with reason `none`, as today. Leftover slots are unaffected (skipped by `generate`).
+- Removed: setting `slot_rules` and its validator, `plans.py` copy of `slot_rules` into new weeks, slot action `rule`, `rule` in slots/view, `rule` and `rule_met` in reasons, the `_candidates` rule filter and fallback; UI: rule grid in the settings, rule select per slot and the hint "Kategorie nicht erfüllt" in the week view; their i18n keys.
+- UI: in the tag editor, a category tag gets a 7×2 grid (Mo–So × Mittag/Abend, same look as the slot pattern grid) to tick its allowed slots, default all ticked; the recipe page and edit form are unchanged (categories are still ticked like tags, several allowed).
+- Bump version to 0.15.0.
+
+**Tests added**
+- `test_db.py`: migration 11 on a DB at version 10 (with a slot that had a `rule_tag_id` and a stored `slot_rules`) → `rule_tag_id` gone, `slot_rules` deleted, `tags.slots` `NULL`.
+- `test_recipes.py`: `slots` round trip and validation (13 / 15 entries, non-bool); allowed mask = AND over several categories; recipe without categories → all `true`; non-category tag's `slots` ignored.
+- `test_planner.py`: a "dinner only" category never lands in a lunch slot; a "Sunday only" category only on Sunday; two categories → intersection; no candidate → reason `none`; `reroll` respects the mask; `set` ignores it.
+- Removed tests for the M13 slot rules are deleted, not skipped.
+
+**Acceptance**
+- [ ] A category "Vesper" with only the dinner slots ticked: "Vorschlag erstellen" never puts a Vesper recipe into a lunch (manual).
+- [ ] A recipe with two categories only appears in slots both allow (manual).
+- [ ] The settings and week view no longer show slot rules (manual).
+- [ ] All tests pass.
 
 ## 10. Testing
 
