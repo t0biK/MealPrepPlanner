@@ -1116,7 +1116,7 @@ Goal: as simple as possible. One concept per question: **categories** answer "wh
 - [ ] Settings has no "Kategorie" checkbox; a new category "Vesper" with only the dinners ticked keeps Vesper recipes out of lunches (manual).
 - [ ] A full week on the phone is about 2–2.5 screens; every slot action is reachable via "⋯" (manual, phone).
 - [ ] Settings sections are collapsed except Haushalt (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ## 10. Testing
 

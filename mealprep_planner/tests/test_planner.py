@@ -11,9 +11,8 @@ SETTINGS = {"repeat_window_days": 14, "new_per_week": 2}
 USERS = ["u"]
 
 
-def recipe(rid, lunch=True, dinner=True, archived=False, tags=(), slots=None):
-    return {"id": rid, "for_lunch": lunch, "for_dinner": dinner, "archived": archived, "tags": list(tags),
-            **({"slots": slots} if slots else {})}
+def recipe(rid, archived=False, tags=(), slots=None):
+    return {"id": rid, "archived": archived, "tags": list(tags), **({"slots": slots} if slots else {})}
 
 
 def make_plan(active=None, overrides=None):
@@ -71,10 +70,10 @@ class CandidateRulesTest(unittest.TestCase):
     def test_archived_excluded(self):
         self.assertEqual(self.only([recipe(1, archived=True), recipe(2)]), {2})
 
-    def test_meal_suitability(self):
-        recipes = [recipe(1, lunch=False), recipe(2, dinner=False), recipe(3)]
-        self.assertEqual(self.only(recipes, meal="lunch"), {2, 3})
-        self.assertEqual(self.only(recipes, meal="dinner"), {1, 3})
+    def test_a_recipe_without_a_category_fits_lunch_and_dinner(self):
+        recipes = [{**recipe(1), "for_lunch": False}, {**recipe(2), "for_dinner": False}, recipe(3)]  # the old flags restrict nothing
+        self.assertEqual(self.only(recipes, meal="lunch"), {1, 2, 3})
+        self.assertEqual(self.only(recipes, meal="dinner"), {1, 2, 3})
 
     def test_vetoed_excluded_even_by_one_user(self):
         ratings = {"u": {1: 5, 2: 0}, "other": {2: 5}}
@@ -420,7 +419,7 @@ class PlanCategorySlotsTest(unittest.TestCase):
         db.upsert_user(self.conn, {"id": "a", "name": "a", "display_name": "Anna"})
         self.settings = db.get_settings(self.conn)
         tag = self.conn.execute("SELECT id FROM tags WHERE name = 'Gäste'").fetchone()[0]
-        recipes.update_tag(self.conn, tag, "Gäste", True, [i % 2 == 1 for i in range(14)])  # dinners only
+        recipes.update_tag(self.conn, tag, "Gäste", [i % 2 == 1 for i in range(14)])  # dinners only
         with self.conn:
             for rid in range(1, 6):  # five dinner-only recipes, ten without category
                 self.conn.execute("INSERT INTO recipes (id, title, source_kind, servings, created_at, updated_at) VALUES (?, 'r', 'manual', 2, 'x', 'x')", (rid,))

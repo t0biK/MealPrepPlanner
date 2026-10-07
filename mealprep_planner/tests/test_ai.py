@@ -36,7 +36,7 @@ def draft(**kw):
     return {
         "format_version": 1, "title": "Alt", "source_url": "https://example.com/r", "source_kind": "web",
         "image_url": "https://example.com/i.jpg", "image": "a" * 64 + ".jpg", "servings": 4, "total_minutes": None,
-        "for_lunch": True, "for_dinner": True, "tags": ["Suppe"], "steps": ["Kochen."], "nutrition": None,
+        "tags": ["Suppe"], "steps": ["Kochen."], "nutrition": None,
         "ingredients": [{"amount": None, "unit": None, "name": "Salz und Pfeffer", "note": None}],
         "warnings": ["already_imported"], **kw,
     }
@@ -76,10 +76,12 @@ class ValidateTest(unittest.TestCase):
             patch, dropped = self.v(**{key: bad})
             self.assertNotIn(key, patch)
             self.assertEqual(dropped, [key])
-        patch, dropped = self.v(for_lunch=False, for_dinner=False)
-        self.assertNotIn("for_lunch", patch)
-        self.assertEqual(dropped, ["for_lunch"])
-        self.assertEqual(self.v(for_lunch=False, for_dinner=True)[0]["for_lunch"], False)
+
+    def test_old_meal_flags_are_accepted_and_dropped(self):
+        for flags in ({"for_lunch": False, "for_dinner": False}, {"for_lunch": "yes"}, {"for_lunch": False, "for_dinner": True}):
+            patch, dropped = self.v(**flags)
+            self.assertFalse({"for_lunch", "for_dinner"} & set(patch))
+            self.assertEqual(dropped, [])
 
     def test_tag_limits(self):
         patch, dropped = self.v(tags=["Gibtsnicht", 5, "Nudeln", "NUDELN", None])
@@ -129,8 +131,7 @@ class ValidateTest(unittest.TestCase):
     def test_unknown_keys_are_dropped(self):
         patch, _ = ai.validate_ai_output({**SAMPLE, "source_url": "https://evil.example/", "image": "x", "evil": 1,
                                           "ingredients": [{**SAMPLE["ingredients"][0], "price": 5}]}, TAGS)
-        self.assertEqual(set(patch), {"title", "servings", "total_minutes", "for_lunch", "for_dinner", "tags",
-                                      "ingredients", "steps", "nutrition"})
+        self.assertEqual(set(patch), {"title", "servings", "total_minutes", "tags", "ingredients", "steps", "nutrition"})
         self.assertEqual(set(patch["ingredients"][0]), {"amount", "unit", "name", "note"})
 
     def test_partial_output(self):
@@ -191,9 +192,10 @@ class EnrichTest(unittest.TestCase):
         (d, _), _ = self.enrich(draft(nutrition=page))
         self.assertEqual(d["nutrition"], page)
 
-    def test_lunch_dinner_from_ai(self):
-        (d, _), _ = self.enrich(draft(), for_lunch=False, for_dinner=True)
-        self.assertEqual((d["for_lunch"], d["for_dinner"]), (False, True))
+    def test_lunch_dinner_from_ai_is_ignored(self):
+        (d, warnings), _ = self.enrich(draft(), for_lunch=False, for_dinner=False)
+        self.assertEqual(warnings, [])
+        self.assertFalse({"for_lunch", "for_dinner"} & set(d))
 
     def test_empty_ai_ingredients_keep_the_draft_ingredients(self):
         (d, _), _ = self.enrich(draft(), ingredients=[])
@@ -227,6 +229,8 @@ class EnrichTest(unittest.TestCase):
         for category in ("Meal Prep", "Sonntagsessen", "Lunchbox", "Ofengericht", "Gäste"):  # M13: the AI judges these from the recipe
             self.assertIn(category, prompt)
         self.assertIn("höchstens 8 passende Tags", prompt)
+        for word in ("for_lunch", "for_dinner", "mittags", "abends"):  # M16: no question about lunch or dinner
+            self.assertNotIn(word, prompt)
         # the draft content is part of the prompt
         for part in ("Alt", "Portionen: 4", "Salz und Pfeffer", "1. Kochen.", "keine"):
             self.assertIn(part, prompt)

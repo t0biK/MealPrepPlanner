@@ -537,13 +537,37 @@ img.thumb {
   margin-bottom: 0.75rem;
 }
 
-.slot {
-  padding: 0.5rem 0 0.75rem;
-  border-bottom: 1px solid var(--border);
+.card.day {
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
 }
 
-.slot:last-of-type {
-  border-bottom: 0;
+.day-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.75rem;
+}
+
+.card .day-head h2 {
+  margin: 0 0 0.25rem;
+}
+
+.day-head .muted {
+  font-size: 0.8rem;
+}
+
+.slot {
+  display: grid;
+  grid-template-columns: 3rem 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.3rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.slot.off {
+  grid-template-columns: 1fr auto;
 }
 
 .slot.off,
@@ -551,28 +575,38 @@ img.thumb {
   opacity: 0.6;
 }
 
-.slot.skipped > a {
+.slot.skipped a {
   text-decoration: line-through;
 }
 
 .slot img.thumb {
-  max-height: 7rem;
-  margin: 0.5rem 0;
+  width: 3rem;
+  height: 3rem;
+  margin: 0;
 }
 
-.slot .actions {
-  margin: 0.25rem 0 0;
+.slot-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
 }
 
-.slot .row > .stepper button,
+.slot-text .muted {
+  font-size: 0.8rem;
+}
+
+.slot-text .reason {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+dialog.picker .stepper button,
 button.icon {
   min-width: 2.5rem;
   min-height: 2.5rem;
   padding: 0.2rem 0.5rem;
-}
-
-.slot p {
-  margin: 0.25rem 0 0;
 }
 
 dialog.picker {
@@ -682,8 +716,33 @@ label.chip.pick.cat {
   margin-bottom: 0.75rem;
 }
 
-.slot .row > select {
-  width: auto;
-  flex: 1;
-  max-width: 14rem;
+.chips + .chips {
+  margin-top: 0.4rem;
+}
+
+/* grouped settings */
+details.card {
+  margin-top: 0;
+}
+
+details.card > summary {
+  color: var(--text);
+  font-weight: 700;
+}
+
+details.card[open] > summary {
+  margin-bottom: 0.75rem;
+}
+
+details.category > summary {
+  color: var(--text);
+}
+
+details.category .tag-row {
+  margin-top: 0.5rem;
+}
+
+.card h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.5rem;
 }

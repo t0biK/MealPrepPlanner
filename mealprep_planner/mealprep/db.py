@@ -172,6 +172,9 @@ MIGRATIONS = [
     ALTER TABLE plan_slots DROP COLUMN rule_tag_id;
     DELETE FROM settings WHERE key = 'slot_rules';
     """,
+    """
+    UPDATE recipes SET for_lunch = 1, for_dinner = 1;
+    """,
 ]
 
 DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None,

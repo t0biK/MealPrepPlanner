@@ -420,7 +420,7 @@ class BuildDraftAiTest(unittest.TestCase):
     CAPTION = "Pasta Pomodoro\n200 g Spaghetti\n1 Dose Tomaten\nSalz"
     OEMBED = {"title": CAPTION, "author_name": "Koch", "thumbnail_url": "https://cdn.example.com/t.jpg"}
     AI = {
-        "title": "Spaghetti Pomodoro", "servings": 2, "total_minutes": 20, "for_lunch": True, "for_dinner": True,
+        "title": "Spaghetti Pomodoro", "servings": 2, "total_minutes": 20,
         "tags": ["Nudeln"], "steps": [], "nutrition": {"kcal": 600, "protein_g": 20, "fat_g": 10, "carbs_g": 100},
         "ingredients": [{"amount": 200, "unit": "g", "name": "Spaghetti", "note": None}],
     }

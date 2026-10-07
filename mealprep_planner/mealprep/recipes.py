@@ -92,13 +92,6 @@ def validate_draft(obj, tag_names, images_dir=None):
     if d["total_minutes"] is not None and (not _int(d["total_minutes"]) or not 1 <= d["total_minutes"] <= 1440):
         errors["total_minutes"] = "invalid"
 
-    for key in ("for_lunch", "for_dinner"):
-        d[key] = get(key, True)
-        if not isinstance(d[key], bool):
-            errors[key] = "invalid"
-    if d["for_lunch"] is False and d["for_dinner"] is False:
-        errors["for_lunch"] = "at_least_one"
-
     d["tags"] = []
     tags = get("tags", [])
     known = {n.casefold(): n for n in tag_names}
@@ -212,30 +205,36 @@ def _tag_name(name):
     return name
 
 
-def create_tag(conn, name):
-    name = _tag_name(name)
-    with conn:
-        if conn.execute("SELECT 1 FROM tags WHERE name = ?", (name,)).fetchone():
-            raise db.InvalidField("name")
-        tag_id = conn.execute("INSERT INTO tags (name) VALUES (?)", (name,)).lastrowid
-    return {"id": tag_id, "name": name, "category": False, "slots": _slots(None)}
-
-
-def update_tag(conn, tag_id, name, category, slots):
-    """Rename a tag, set whether it is a category and its 14 slot flags (where the planner may put its recipes; they only
-    count while it is a category). Returns the tag, or None if it does not exist."""
+def create_tag(conn, name, category=False):
+    """A new tag, or a new category (`category` is fixed from here on; categories answer "when does it fit?")."""
     name = _tag_name(name)
     if not isinstance(category, bool):
         raise db.InvalidField("category")
-    if not isinstance(slots, list) or len(slots) != 14 or not all(isinstance(v, bool) for v in slots):
+    with conn:
+        if conn.execute("SELECT 1 FROM tags WHERE name = ?", (name,)).fetchone():
+            raise db.InvalidField("name")
+        tag_id = conn.execute("INSERT INTO tags (name, category) VALUES (?, ?)", (name, int(category))).lastrowid
+    return {"id": tag_id, "name": name, "category": category, "slots": _slots(None)}
+
+
+def update_tag(conn, tag_id, name, slots=None):
+    """Rename a tag or category; a category also takes its 14 slot flags (where the planner may put its recipes), a plain
+    tag takes none. The category flag never changes. Returns the tag, or None if it does not exist."""
+    name = _tag_name(name)
+    row = conn.execute("SELECT category FROM tags WHERE id = ?", (tag_id,)).fetchone()
+    if row is None:
+        return None
+    if row["category"]:
+        if not isinstance(slots, list) or len(slots) != 14 or not all(isinstance(v, bool) for v in slots):
+            raise db.InvalidField("slots")
+    elif slots is not None:
         raise db.InvalidField("slots")
     with conn:
         if conn.execute("SELECT 1 FROM tags WHERE name = ? AND id != ?", (name, tag_id)).fetchone():
             raise db.InvalidField("name")
-        if conn.execute("UPDATE tags SET name = ?, category = ?, slots = ? WHERE id = ?",
-                        (name, int(category), None if all(slots) else json.dumps(slots), tag_id)).rowcount == 0:
-            return None
-    return {"id": tag_id, "name": name, "category": category, "slots": slots}
+        conn.execute("UPDATE tags SET name = ?, slots = ? WHERE id = ?",
+                     (name, None if slots is None or all(slots) else json.dumps(slots), tag_id))
+    return {"id": tag_id, "name": name, "category": bool(row["category"]), "slots": slots or _slots(None)}
 
 
 def delete_tag(conn, tag_id):
@@ -266,7 +265,7 @@ def _columns(draft):
     n = draft["nutrition"] or {}
     return (
         draft["title"], draft["source_url"], draft["source_kind"], draft["image"], draft["servings"],
-        draft["total_minutes"], draft["for_lunch"], draft["for_dinner"], json.dumps(draft["steps"]),
+        draft["total_minutes"], json.dumps(draft["steps"]),
         n.get("kcal"), n.get("protein_g"), n.get("fat_g"), n.get("carbs_g"), n.get("source"),
     )
 
@@ -275,9 +274,9 @@ def create_recipe(conn, draft, user_id):
     now = _now()
     with conn:
         recipe_id = conn.execute(
-            "INSERT INTO recipes (title, source_url, source_kind, image, servings, total_minutes, for_lunch, "
-            "for_dinner, steps, kcal, protein_g, fat_g, carbs_g, nutrition_source, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO recipes (title, source_url, source_kind, image, servings, total_minutes, steps, kcal, protein_g, "
+            "fat_g, carbs_g, nutrition_source, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (*_columns(draft), user_id, now, now),
         ).lastrowid
         _store_children(conn, recipe_id, draft)
@@ -289,8 +288,8 @@ def update_recipe(conn, recipe_id, draft):
     with conn:
         cur = conn.execute(
             "UPDATE recipes SET title = ?, source_url = ?, source_kind = ?, image = ?, servings = ?, "
-            "total_minutes = ?, for_lunch = ?, for_dinner = ?, steps = ?, kcal = ?, protein_g = ?, fat_g = ?, "
-            "carbs_g = ?, nutrition_source = ?, updated_at = ? WHERE id = ?",
+            "total_minutes = ?, steps = ?, kcal = ?, protein_g = ?, fat_g = ?, carbs_g = ?, nutrition_source = ?, "
+            "updated_at = ? WHERE id = ?",
             (*_columns(draft), _now(), recipe_id),
         )
         if cur.rowcount == 0:
@@ -316,8 +315,6 @@ def get_recipe(conn, recipe_id):
         "image": r["image"],
         "servings": r["servings"],
         "total_minutes": r["total_minutes"],
-        "for_lunch": bool(r["for_lunch"]),
-        "for_dinner": bool(r["for_dinner"]),
         "tags": [t["name"] for t in conn.execute(
             "SELECT name FROM tags JOIN recipe_tags ON tag_id = id WHERE recipe_id = ? ORDER BY name COLLATE NOCASE",
             (recipe_id,))],
@@ -351,7 +348,7 @@ def list_recipes(conn, q="", tag="", archived=False, user_id=None, sort="title",
             names.setdefault(row["recipe_id"], []).append(row["name"].casefold())
     out = []
     for r in conn.execute(
-        "SELECT id, title, image, total_minutes, for_lunch, for_dinner FROM recipes WHERE archived = ?", (int(archived),)
+        "SELECT id, title, image, total_minutes FROM recipes WHERE archived = ?", (int(archived),)
     ):
         recipe_tags = tags.get(r["id"], [])
         if tag and tag.casefold() not in (t.casefold() for t in recipe_tags):
@@ -362,8 +359,7 @@ def list_recipes(conn, q="", tag="", archived=False, user_id=None, sort="title",
         if unrated_by_me and my_stars is not None:
             continue
         out.append({"id": r["id"], "title": r["title"], "image": r["image"], "total_minutes": r["total_minutes"],
-                    "for_lunch": bool(r["for_lunch"]), "for_dinner": bool(r["for_dinner"]), "tags": recipe_tags,
-                    "household_score": planner.household_score(model, r["id"])[0], "my_stars": my_stars,
+                    "tags": recipe_tags, "household_score": planner.household_score(model, r["id"])[0], "my_stars": my_stars,
                     "vetoed": planner.is_vetoed(model, r["id"])})
     out.sort(key=lambda r: sort_key(r["title"]))
     if sort == "score":
@@ -445,11 +441,10 @@ def rating_info(conn, recipe_id, user_id):
 # ---- planning (M7) ----
 
 def planning_recipes(conn):
-    """What the planner needs of every recipe: id, meal suitability, archived flag, tags, kcal per portion (or None) and the
-    slots its categories allow (14 bools, all true without categories)."""
+    """What the planner needs of every recipe: id, archived flag, tags, kcal per portion (or None) and the slots its
+    categories allow (14 bools, all true without categories)."""
     tags = _tag_map(conn)
     masks = {r["name"]: _slots(r["slots"]) for r in conn.execute("SELECT name, slots FROM tags WHERE category = 1")}
-    return [{"id": r["id"], "for_lunch": bool(r["for_lunch"]), "for_dinner": bool(r["for_dinner"]),
-             "archived": bool(r["archived"]), "tags": tags.get(r["id"], []), "kcal": r["kcal"],
+    return [{"id": r["id"], "archived": bool(r["archived"]), "tags": tags.get(r["id"], []), "kcal": r["kcal"],
              "slots": [all(masks[t][i] for t in tags.get(r["id"], []) if t in masks) for i in range(14)]}
-            for r in conn.execute("SELECT id, for_lunch, for_dinner, archived, kcal FROM recipes ORDER BY id")]
+            for r in conn.execute("SELECT id, archived, kcal FROM recipes ORDER BY id")]

@@ -71,6 +71,10 @@ function card(title, ...children) {
   return el("section", { className: "card" }, ...(title ? [el("h2", { textContent: title })] : []), ...children);
 }
 
+function label(text, ...children) {
+  return el("label", { className: "field" }, el("span", { textContent: text }), ...children);
+}
+
 let toastTimer;
 function toast(text) {
   const box = document.getElementById("toast");
@@ -112,7 +116,7 @@ async function pageSettings(app) {
     }
   };
 
-  const lang = el("select", {},
+  const lang = el("select", { ariaLabel: t("settings.language") },
     option("", t("settings.language.auto"), !me.lang),
     option("de", t("settings.language.de"), me.lang === "de"),
     option("en", t("settings.language.en"), me.lang === "en"));
@@ -195,23 +199,28 @@ async function pageSettings(app) {
   }));
 
   const health = await api("GET", "api/health");
+  // native <details> sections; only the household is open
+  const section = (title, open, ...children) => el("details", { className: "card", open },
+    el("summary", { textContent: title }), ...children);
   app.replaceChildren(
     el("h1", { textContent: t("settings.title") }),
-    card(t("settings.language"), lang),
-    card(t("settings.default_portions"), numberSetting("default_portions", 1, 12)),
-    card(t("settings.household"), household, el("p", { className: "muted", textContent: t("settings.household_hint") }),
+    section(t("settings.household"), true, household, el("p", { className: "muted", textContent: t("settings.household_hint") }),
       el("p", { className: "muted", textContent: t("settings.targets_hint") })),
-    card(t("settings.slot_pattern"), patternGrid, el("p", { className: "muted", textContent: t("settings.slot_pattern_hint") })),
-    card(t("settings.repeat_window_days"), numberSetting("repeat_window_days", 0, 60)),
-    card(t("settings.new_per_week"), numberSetting("new_per_week", 0, 14)),
-    await tagEditor(),
-    card(t("settings.pantry"), pantry, el("p", { className: "muted", textContent: t("settings.pantry_hint") })),
-    card(t("settings.bring"), await entityPicker("todo", "bring_entity")),
-    card(t("settings.inbox"), await entityPicker("todo", "inbox_entity")),
-    card(t("settings.ai"),
+    section(t("settings.planning"), false,
+      el("div", { className: "field" }, el("span", { textContent: t("settings.slot_pattern") }), patternGrid,
+        el("p", { className: "muted", textContent: t("settings.slot_pattern_hint") })),
+      label(t("settings.repeat_window_days"), numberSetting("repeat_window_days", 0, 60)),
+      label(t("settings.new_per_week"), numberSetting("new_per_week", 0, 14))),
+    section(t("nav.recipes"), false, await tagEditor(true), await tagEditor(false),
+      label(t("settings.default_portions"), numberSetting("default_portions", 1, 12))),
+    section(t("settings.pantry"), false, pantry, el("p", { className: "muted", textContent: t("settings.pantry_hint") })),
+    section(t("settings.connections"), false,
+      label(t("settings.bring"), await entityPicker("todo", "bring_entity")),
+      label(t("settings.inbox"), await entityPicker("todo", "inbox_entity")),
       el("label", { className: "row" }, t("settings.ai_enabled"), aiEnabled),
-      await entityPicker("ai_task", "ai_entity")),
-    card(null, el("a", { href: "#/systemcheck", textContent: t("settings.systemcheck") + " →" })),
+      label(t("settings.ai_entity"), await entityPicker("ai_task", "ai_entity")),
+      el("a", { href: "#/systemcheck", textContent: t("settings.systemcheck") + " →" })),
+    section(t("settings.language"), false, lang),
     el("p", { className: "muted", textContent: t("app.running", { version: health.version }) }),
   );
 }
@@ -287,10 +296,11 @@ function image(name) {
   return name ? [el("img", { className: "thumb", src: "images/" + name, alt: "", loading: "lazy" })] : [];
 }
 
-// category chips (M13) are styled apart from the other tags
-function chips(names, categories = new Set()) {
-  return el("div", { className: "chips" },
-    ...names.map((n) => el("span", { className: "chip" + (categories.has(n) ? " cat" : ""), textContent: n })));
+// categories ("when does it fit?") and tags (the dish) on separate lines
+function chipLines(names, categories) {
+  const line = (list, cat) => (list.length ? [el("div", { className: "chips" },
+    ...list.map((n) => el("span", { className: "chip" + (cat ? " cat" : ""), textContent: n })))] : []);
+  return [...line(names.filter((n) => categories.has(n)), true), ...line(names.filter((n) => !categories.has(n)), false)];
 }
 
 const categorySet = (tags) => new Set(tags.filter((x) => x.category).map((x) => x.name));
@@ -355,13 +365,7 @@ function ratingCard(id, r) {
   return box;
 }
 
-function mealInfo(r) {
-  return [
-    r.total_minutes ? t("recipes.minutes", { n: r.total_minutes }) : "",
-    r.for_lunch && !r.for_dinner ? t("recipes.lunch_only") : "",
-    !r.for_lunch && r.for_dinner ? t("recipes.dinner_only") : "",
-  ].filter(Boolean).join(" · ");
-}
+const mealInfo = (r) => (r.total_minutes ? t("recipes.minutes", { n: r.total_minutes }) : "");
 
 async function pageRecipes(app) {
   const tags = await api("GET", "api/tags");
@@ -371,8 +375,8 @@ async function pageRecipes(app) {
 
   const search = el("input", { type: "search", placeholder: t("recipes.search"), ariaLabel: t("recipes.search") });
   const tagSel = el("select", { ariaLabel: t("form.tags") }, option("", t("recipes.all_tags"), true),
-    ...tags.map((x) => option(x.name, x.name, false)));
-  const categorySel = el("select", { ariaLabel: t("settings.category") }, option("", t("recipes.all_categories"), true),
+    ...tags.filter((x) => !x.category).map((x) => option(x.name, x.name, false)));
+  const categorySel = el("select", { ariaLabel: t("form.categories") }, option("", t("recipes.all_categories"), true),
     ...tags.filter((x) => x.category).map((x) => option(x.name, x.name, false)));
   const archive = el("input", { type: "checkbox" });
   const sortSel = el("select", { ariaLabel: t("recipes.sort") },
@@ -390,7 +394,7 @@ async function pageRecipes(app) {
           el("h2", { textContent: r.title }),
           el("p", { className: "muted", textContent: mealInfo(r) }),
           ratingLine(r),
-          chips(r.tags, categories)))
+          ...chipLines(r.tags, categories)))
         : [el("p", { className: "muted", textContent: t("recipes.empty") })]));
     } catch (e) {
       toast(errorText(e));
@@ -469,7 +473,7 @@ async function pageRecipe(app, id, query = "") {
     el("h1", { textContent: r.title }),
     ...(r.archived ? [el("p", {}, el("span", { className: "badge", textContent: t("recipe.archived") }))] : []),
     el("p", { className: "muted", textContent: mealInfo(r) }),
-    chips(r.tags, categorySet(tags)),
+    ...chipLines(r.tags, categorySet(tags)),
     ratingCard(id, r),
     card(t("recipe.ingredients"),
       el("div", { className: "row" }, t("recipe.portions"), el("div", { className: "stepper" }, minus, count, plus)),
@@ -496,21 +500,18 @@ async function pageRecipeForm(app, id, job = null) {
     api("GET", "api/tags"), api("GET", "api/ingredient-names"), api("GET", "api/settings"),
     id ? api("GET", "api/recipes/" + id) : null,
   ]);
-  const r = job ? job.draft : existing ?? { title: "", servings: settings.default_portions, total_minutes: null, for_lunch: true,
-    for_dinner: true, tags: [], ingredients: [{}], steps: [], nutrition: null, source_url: null };
+  const r = job ? job.draft : existing ?? { title: "", servings: settings.default_portions, total_minutes: null,
+    tags: [], ingredients: [{}], steps: [], nutrition: null, source_url: null };
 
   const input = (props) => el("input", props);
-  const label = (text, ...children) => el("label", { className: "field" }, el("span", { textContent: text }), ...children);
   const title = input({ type: "text", value: r.title, maxLength: 200, required: true });
   const servings = input({ type: "number", min: 1, max: 50, step: 1, value: r.servings });
   const minutes = input({ type: "number", min: 1, max: 1440, step: 1, value: r.total_minutes ?? "" });
-  const lunch = input({ type: "checkbox", checked: r.for_lunch });
-  const dinner = input({ type: "checkbox", checked: r.for_dinner });
   const sourceUrl = input({ type: "url", value: r.source_url ?? "", maxLength: 2048 });
 
   const tagBoxes = tags.map((x) => {
     const box = input({ type: "checkbox", checked: r.tags.some((n) => n.toLowerCase() === x.name.toLowerCase()) });
-    return { name: x.name, box, node: el("label", { className: "chip pick" + (x.category ? " cat" : "") }, box, x.name) };
+    return { name: x.name, category: x.category, box, node: el("label", { className: "chip pick" + (x.category ? " cat" : "") }, box, x.name) };
   });
 
   // ingredient rows
@@ -627,7 +628,6 @@ async function pageRecipeForm(app, id, job = null) {
 
   const save = async (ev) => {
     ev.preventDefault();
-    if (!lunch.checked && !dinner.checked) return toast(t("form.need_meal"));
     const ingredients = readIngredients();
     if (!ingredients) return;
     const values = readNutrition();
@@ -639,8 +639,6 @@ async function pageRecipeForm(app, id, job = null) {
       image: r.image ?? null,
       servings: Number(servings.value),
       total_minutes: numOrNull(minutes),
-      for_lunch: lunch.checked,
-      for_dinner: dinner.checked,
       tags: tagBoxes.filter((x) => x.box.checked).map((x) => x.name),
       ingredients,
       steps: stepRows.map((a) => a.value).filter((v) => v.trim()),
@@ -657,9 +655,10 @@ async function pageRecipeForm(app, id, job = null) {
 
   const form = el("form", {},
     card(null, ...image(r.image), label(t("form.title"), title),
-      el("div", { className: "two" }, label(t("form.servings"), servings), label(t("form.minutes"), minutes)),
-      el("div", { className: "row" }, t("form.lunch"), lunch), el("div", { className: "row" }, t("form.dinner"), dinner)),
-    card(t("form.tags"), el("div", { className: "chips" }, ...tagBoxes.map((x) => x.node))),
+      el("div", { className: "two" }, label(t("form.servings"), servings), label(t("form.minutes"), minutes))),
+    card(t("form.categories"), el("div", { className: "chips" }, ...tagBoxes.filter((x) => x.category).map((x) => x.node)),
+      el("p", { className: "muted", textContent: t("form.categories_hint") })),
+    card(t("form.tags"), el("div", { className: "chips" }, ...tagBoxes.filter((x) => !x.category).map((x) => x.node))),
     card(t("form.ingredients"), dataList, ingBox, el("div", { className: "actions" }, addIngBtn),
       el("details", {}, el("summary", { textContent: t("form.paste") }), paste, pasteBtn)),
     card(t("form.steps"), stepBox, el("div", { className: "actions" }, addStepBtn)),
@@ -854,13 +853,41 @@ async function pageWeek(app, week) {
     return b;
   };
 
+  // one compact row per meal; every action lives in the dialog behind "⋯"
   const slotView = (s) => {
-    const meal = el("strong", { textContent: t(s.meal === "lunch" ? "form.lunch" : "form.dinner") });
+    const meal = t(s.meal === "lunch" ? "form.lunch" : "form.dinner");
+    const more = icon("⋯", t("plan.menu", { slot: slotLabel(s) }), () => openMenu(s));
     if (!s.active) {
-      return el("div", { className: "slot off" }, el("div", { className: "row" }, meal,
-        el("span", { className: "muted", textContent: t("plan.off") }),
-        icon("▶", t("plan.activate"), () => slotAct(s, { action: "activate" }))));
+      return el("div", { className: "slot off" }, el("span", { className: "muted", textContent: `${meal} · ${t("plan.off")}` }), more);
     }
+    const [thumb = el("span")] = image(s.recipe?.image);
+    const cooked = s.leftover ? t("plan.leftover_of", { slot: slotLabel(s.leftover) })
+      : s.recipe ? t(s.cooked_portions === 1 ? "plan.cooked_one" : "plan.cooked", { n: fmtPortion(s.cooked_portions) }) : "";
+    return el("div", { className: "slot" + (s.skipped ? " skipped" : "") }, thumb,
+      el("div", { className: "slot-text" },
+        el("span", { className: "muted", textContent: [(s.locked ? "🔒 " : "") + meal, cooked].filter(Boolean).join(" · ") }),
+        s.recipe ? el("a", { href: recipeHref(s.recipe.id, s.leftover ? "" : s.cooked_portions), textContent: s.recipe.title })
+          : el("span", { className: "muted", textContent: t("plan.empty_slot") }),
+        ...(s.leftover ? [] : [el("span", { className: "muted reason", textContent: reasonText(s.reason) })])),
+      more);
+  };
+
+  // who eats at the canteen on a day (the lunch is then not cooked for them)
+  const canteenRow = (day) => {
+    const at = new Set(plan.totals[day].canteen);
+    return el("div", { className: "field" }, el("span", { textContent: t("plan.canteen") }),
+      el("div", { className: "chips", role: "group", ariaLabel: t("plan.canteen") },
+        ...household.filter((p) => p.eats || at.has(p.user_id)).map((p) => {
+          const box = el("input", { type: "checkbox", checked: at.has(p.user_id) });
+          box.onchange = () => act("canteen", { day, user_id: p.user_id, on: box.checked });
+          return el("label", { className: "chip pick" }, box, p.display_name);
+        })));
+  };
+
+  // the dialog's controls; the same rules as before decide what is offered
+  const slotMenu = (s) => {
+    const canteen = s.meal === "lunch" ? [canteenRow(s.day)] : [];
+    if (!s.active) return [icon("▶ " + t("plan.activate"), t("plan.activate"), () => slotAct(s, { action: "activate" })), ...canteen];
     const minus = icon("−", t("plan.guests_less"), () => slotAct(s, { action: "guests", n: s.guests - 1 }));
     const plus = icon(t("plan.guest_add"), t("plan.guests_more"), () => slotAct(s, { action: "guests", n: s.guests + 1 }));
     minus.disabled = s.guests <= 0;
@@ -887,37 +914,44 @@ async function pageWeek(app, week) {
       const [day, from] = leftoverSel.value.split("-");
       slotAct(s, { action: "leftover", from_day: from ? Number(day) : null, from_meal: from ?? null });
     };
-    return el("div", { className: "slot" + (s.skipped ? " skipped" : "") },
-      el("div", { className: "row" }, meal, el("span", { className: "muted",
-        textContent: s.leftover ? t("plan.leftover_of", { slot: slotLabel(s.leftover) }) : t("plan.cooked", { n: fmtPortion(s.cooked_portions) }) })),
-      chips,
+    const lockLabel = t(s.locked ? "plan.unlock" : "plan.lock");
+    return [
+      ...(s.recipe ? [el("p", {}, el("strong", { textContent: s.recipe.title }))] : []),
+      ...(s.leftover ? [] : [el("p", { className: "muted", textContent: reasonText(s.reason) })]),
+      el("div", { className: "actions" },
+        ...(s.leftover || s.locked || past ? [] : [icon("🎲 " + t("plan.reroll"), t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
+        ...(s.leftover || past ? [] : [icon("✏️ " + t("plan.replace"), t("plan.replace"),
+          () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id })))]),
+        ...(s.recipe && !s.leftover ? [icon((s.locked ? "🔓 " : "🔒 ") + lockLabel, lockLabel,
+          () => slotAct(s, { action: s.locked ? "unlock" : "lock" }))] : [])),
+      ...(past || isSource || !(sources.length || s.leftover) ? [] : [label(t("plan.leftover"), leftoverSel)]),
+      el("div", { className: "field" }, el("span", { textContent: t("plan.eaters") }), chips),
       el("div", { className: "row" }, el("span", { className: "muted", textContent: t("plan.guests") }),
         el("div", { className: "stepper", role: "group", ariaLabel: t("plan.guests") }, minus, el("strong", { textContent: s.guests }), plus)),
-      ...(s.recipe ? [...image(s.recipe.image), el("a", { href: "#/rezepte/" + s.recipe.id, textContent: s.recipe.title })]
-        : [el("span", { className: "muted", textContent: t("plan.empty_slot") })]),
-      ...(s.leftover ? [] : [el("p", { className: "muted", textContent: reasonText(s.reason) })]),
-      ...(past || isSource || !(sources.length || s.leftover) ? []
-        : [el("label", { className: "row" }, el("span", { className: "muted", textContent: t("plan.leftover") }), leftoverSel)]),
+      ...canteen,
       ...(needsKcal ? [el("p", {}, el("a", { href: `#/rezepte/${s.recipe.id}/bearbeiten`, textContent: t("form.estimate") }))] : []),
-      el("div", { className: "actions" },
-        ...(s.leftover || s.locked || past ? [] : [icon("🎲", t("plan.reroll"), () => slotAct(s, { action: "reroll" }))]),
-        ...(s.leftover || past ? [] : [icon("✏️", t("plan.replace"), () => pickRecipe((id) => slotAct(s, { action: "set", recipe_id: id })))]),
-        ...(s.recipe && !s.leftover ? [icon(s.locked ? "🔓" : "🔒", t(s.locked ? "plan.unlock" : "plan.lock"),
-          () => slotAct(s, { action: s.locked ? "unlock" : "lock" }))] : []),
-        icon("⏸", t("plan.deactivate"), () => slotAct(s, { action: "deactivate" }))),
-      ...(plan.status === "confirmed" && s.date <= plan.today ? [el("label", { className: "row" }, t("plan.skipped"), skip)] : []));
+      ...(plan.status === "confirmed" && s.date <= plan.today ? [el("label", { className: "row" }, t("plan.skipped"), skip)] : []),
+      el("div", { className: "actions" }, icon("⏸ " + t("plan.deactivate"), t("plan.deactivate"), () => slotAct(s, { action: "deactivate" }))),
+    ];
   };
 
-  // who eats at the canteen on a day (the lunch is then not cooked for them)
-  const canteenRow = (day) => {
-    const at = new Set(plan.totals[day].canteen);
-    return el("div", { className: "row" }, el("span", { className: "muted", textContent: t("plan.canteen") }),
-      el("div", { className: "chips", role: "group", ariaLabel: t("plan.canteen") },
-        ...household.filter((p) => p.eats || at.has(p.user_id)).map((p) => {
-          const box = el("input", { type: "checkbox", checked: at.has(p.user_id) });
-          box.onchange = () => act("canteen", { day, user_id: p.user_id, on: box.checked });
-          return el("label", { className: "chip pick" }, box, p.display_name);
-        })));
+  // native <dialog> like pickRecipe's; redrawn from the new plan after every action
+  let redrawMenu = null;
+  const openMenu = (s0) => {
+    const dialog = el("dialog", { className: "picker" });
+    redrawMenu = () => {
+      const s = plan.slots.find((x) => x.day === s0.day && x.meal === s0.meal);
+      const close = el("button", { type: "button", className: "secondary", textContent: t("plan.close") });
+      close.onclick = () => dialog.close();
+      dialog.replaceChildren(el("h2", { textContent: slotLabel(s) }), ...slotMenu(s), el("div", { className: "actions" }, close));
+    };
+    redrawMenu();
+    dialog.onclose = () => {
+      redrawMenu = null;
+      dialog.remove();
+    };
+    document.body.append(dialog);
+    dialog.showModal();
   };
 
   // per person: kcal and protein of the day against the targets (green within 10 %, amber outside)
@@ -925,7 +959,7 @@ async function pageWeek(app, week) {
     const tone = (value, target) => (target && !v.incomplete ? (Math.abs(value - target) <= 0.1 * target ? " ok" : " warn") : "");
     const part = (text, value, target) => el("span", { className: "tone" + tone(value, target), textContent: text });
     const target = (n) => (n ? ` / ${n}` : "");
-    return el("p", { className: "muted" }, `${household.find((p) => p.user_id === id)?.display_name ?? id}: `,
+    return el("span", { className: "muted" }, `${household.find((p) => p.user_id === id)?.display_name ?? id}: `,
       part(`${Math.round(v.kcal)}${target(v.kcal_target)} kcal`, v.kcal, v.kcal_target),
       ...(v.protein_target || v.protein_g ? [" · ",
         part(`${t("recipe.protein")} ${Math.round(v.protein_g)}${target(v.protein_target)} g`, v.protein_g, v.protein_target)] : []),
@@ -953,11 +987,13 @@ async function pageWeek(app, week) {
         el("span", { className: "badge " + (plan.status === "confirmed" ? "ok" : ""), textContent: t(`plan.status.${plan.status}`) }),
         el("a", { href: "#/woche/" + shiftWeek(weekOf(new Date()), 1), textContent: t("plan.next_week") })),
       el("div", { className: "actions" }, generate, confirmBtn, bring),
-      ...plan.dates.map((iso, day) => card(
-        parseDate(iso).toLocaleDateString(lang, { weekday: "long", day: "numeric", month: "numeric" }),
-        ...plan.slots.filter((s) => s.day === day).flatMap((s) => (s.meal === "lunch" ? [slotView(s), canteenRow(day)] : [slotView(s)])),
-        ...(Object.keys(plan.totals[day].totals_by_user).length ? personTotals(day)
-          : totalsText(plan.totals[day]) ? [el("p", { className: "muted", textContent: totalsText(plan.totals[day]) })] : []))));
+      ...plan.dates.map((iso, day) => el("section", { className: "card day" },
+        el("div", { className: "day-head" },
+          el("h2", { textContent: parseDate(iso).toLocaleDateString(lang, { weekday: "long", day: "numeric", month: "numeric" }) }),
+          ...(Object.keys(plan.totals[day].totals_by_user).length ? personTotals(day)
+            : totalsText(plan.totals[day]) ? [el("span", { className: "muted", textContent: totalsText(plan.totals[day]) })] : [])),
+        ...plan.slots.filter((s) => s.day === day).map(slotView))));
+    redrawMenu?.();
   };
   app.replaceChildren(el("h1", { textContent: t("plan.title") }), root);
   show();
@@ -972,7 +1008,7 @@ async function pageToday(app) {
   const mealRow = (meal, s) => el("div", { className: "row" },
     el("strong", { textContent: t(meal === "lunch" ? "form.lunch" : "form.dinner") }),
     s ? el("span", {}, el("a", { href: recipeHref(s.recipe_id, s.leftover ? "" : s.cooked_portions), textContent: s.title }), " ",
-      el("span", { className: "muted", textContent: s.leftover ? t("today.leftover") : t("today.portions", { n: fmtPortion(s.cooked_portions) }) }))
+      el("span", { className: "muted", textContent: s.leftover ? t("today.leftover") : t(s.cooked_portions === 1 ? "today.portions_one" : "today.portions", { n: fmtPortion(s.cooked_portions) }) }))
       : el("span", { className: "muted", textContent: "–" }));
   // "Deine Portion: 1¼ (≈ 780 kcal)", or "Kantine" for a canteen lunch
   const mine = (s, canteen) => {
@@ -1118,17 +1154,18 @@ async function pageImportJob(app, id) {
       ...(job.status === "failed" ? [jobActions(job, "#/import")] : [])));
 }
 
-async function tagEditor() {
+// tags (the dish) or categories ("when does it fit?"): rename, delete, add; a category opens its slot grid
+async function tagEditor(category) {
   const body = el("div");
+  let openId = null; // the category whose grid is open stays open after a refresh
   const refresh = async () => {
-    const tags = await api("GET", "api/tags");
+    const tags = (await api("GET", "api/tags")).filter((x) => x.category === category);
     const rows = tags.map((x) => {
       const name = el("input", { type: "text", value: x.name, maxLength: 50, ariaLabel: x.name });
-      const category = el("input", { type: "checkbox", checked: x.category });
       const slots = [...x.slots];
       const put = async () => {
         try {
-          await api("PUT", "api/tags/" + x.id, { name: name.value, category: category.checked, slots });
+          await api("PUT", "api/tags/" + x.id, category ? { name: name.value, slots } : { name: name.value });
           toast(t("settings.saved"));
           return true;
         } catch (e) {
@@ -1136,7 +1173,7 @@ async function tagEditor() {
           return false;
         }
       };
-      name.onchange = category.onchange = async () => {
+      name.onchange = async () => {
         await put();
         await refresh();
       };
@@ -1150,14 +1187,19 @@ async function tagEditor() {
         }
         await refresh();
       };
-      return el("div", {}, el("div", { className: "tag-row" }, name, el("label", { className: "chip pick" }, category, t("settings.category")), del),
-        ...(x.category ? [slotGrid(slots, async () => { if (!(await put())) await refresh(); }, x.name + ": ")] : []));
+      const row = el("div", { className: "tag-row" }, name, del);
+      if (!category) return row;
+      const details = el("details", { className: "category", open: x.id === openId }, el("summary", { textContent: x.name }), row,
+        slotGrid(slots, async () => { if (!(await put())) await refresh(); }, x.name + ": "));
+      details.ontoggle = () => { openId = details.open ? x.id : openId === x.id ? null : openId; };
+      return details;
     });
-    const fresh = el("input", { type: "text", maxLength: 50, placeholder: t("settings.tag_add"), ariaLabel: t("settings.tag_add") });
+    const placeholder = t(category ? "settings.category_add" : "settings.tag_add");
+    const fresh = el("input", { type: "text", maxLength: 50, placeholder, ariaLabel: placeholder });
     const add = el("button", { type: "button", textContent: t("settings.add") });
     add.onclick = async () => {
       try {
-        await api("POST", "api/tags", { name: fresh.value });
+        await api("POST", "api/tags", { name: fresh.value, category });
         await refresh();
       } catch (e) {
         toast(errorText(e));
@@ -1166,7 +1208,8 @@ async function tagEditor() {
     body.replaceChildren(...rows, el("div", { className: "tag-row" }, fresh, add));
   };
   await refresh();
-  return card(t("settings.tags"), body, el("p", { className: "muted", textContent: t("settings.tag_slots_hint") }));
+  return el("div", {}, el("h3", { textContent: t(category ? "settings.categories" : "settings.tags") }), body,
+    ...(category ? [el("p", { className: "muted", textContent: t("settings.category_slots_hint") })] : []));
 }
 
 // hash route -> [nav tab, page function]

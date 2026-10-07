@@ -1,7 +1,7 @@
 """Taste prediction (M6) and week planning (M7): pure functions on plain data (history() is the only DB read).
 
 ratings: {user_id: {recipe_id: stars 0-5}}   tags: {recipe_id: [tag names]}   users: [user_id]
-recipes: [{id, for_lunch, for_dinner, archived, tags, kcal, slots}]   (slots: 14 bools, index = day * 2 + 0 lunch / 1 dinner, absent = all)   history: [(recipe_id, date)]
+recipes: [{id, archived, tags, kcal, slots}]   (slots: 14 bools, index = day * 2 + 0 lunch / 1 dinner, absent = all)   history: [(recipe_id, date)]
 slot: {day 0-6, meal, active, recipe_id, eaters [user_id], guests, locked, skipped, reason, leftover ((day, meal) of the source | None)}   plan: {week, slots: [slot x 14], canteen}
 M14: a leftover slot has no recipe of its own; its recipe_id is its source's (resolve_leftovers), so every function below sees what is eaten.
 M12: people: {user_id: {kcal_target, protein_target_g, canteen_kcal}}   canteen: {day: [user_id]}   nutrition: {recipe_id: {kcal, ...} | None}
@@ -133,13 +133,12 @@ def _reason(model, recipe_id, cooked, fit_label=None):
 
 
 def _candidates(slot, dates, recipes, model, history, used, window):
-    """Recipe ids that may fill the slot: not archived, matching meal, not vetoed, not used this week, not cooked recently,
-    and allowed in this slot by all of its categories (M15)."""
-    suits = "for_lunch" if slot["meal"] == "lunch" else "for_dinner"
+    """Recipe ids that may fill the slot: not archived, not vetoed, not used this week, not cooked recently, and allowed in
+    this slot by all of its categories (M15; a recipe without a category fits every slot)."""
     day = dates[slot["day"]]
     index = slot["day"] * 2 + MEALS.index(slot["meal"])
     recent = {rid for rid, d in history if abs((d - day).days) < window}
-    return sorted(r["id"] for r in recipes if not r["archived"] and r[suits] and r.get("slots", ALL_SLOTS)[index]
+    return sorted(r["id"] for r in recipes if not r["archived"] and r.get("slots", ALL_SLOTS)[index]
                   and r["id"] not in used and r["id"] not in recent and not is_vetoed(model, r["id"]))
 
 

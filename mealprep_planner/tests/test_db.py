@@ -191,6 +191,25 @@ class DbTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_migration_12_on_a_db_at_version_11(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.connect(tmp)
+            try:
+                for n, script in enumerate(db.MIGRATIONS[:11], start=1):  # the database as shipped with M15
+                    conn.executescript(f"BEGIN; {script} PRAGMA user_version = {n}; COMMIT;")
+                with conn:
+                    for rid, lunch, dinner in ((1, 1, 0), (2, 0, 1), (3, 1, 1)):
+                        conn.execute("INSERT INTO recipes (id, title, source_kind, servings, for_lunch, for_dinner, created_at, updated_at) "
+                                     "VALUES (?, 'r', 'manual', 2, ?, ?, 'x', 'x')", (rid, lunch, dinner))
+                db.migrate(conn)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], len(db.MIGRATIONS))
+                self.assertEqual([tuple(r) for r in conn.execute("SELECT for_lunch, for_dinner FROM recipes ORDER BY id")], [(1, 1)] * 3)
+                with conn:  # the columns stay, and inserts without them rely on the default
+                    conn.execute("INSERT INTO recipes (title, source_kind, servings, created_at, updated_at) VALUES ('n', 'manual', 2, 'x', 'x')")
+                self.assertEqual(tuple(conn.execute("SELECT for_lunch, for_dinner FROM recipes WHERE title = 'n'").fetchone()), (1, 1))
+            finally:
+                conn.close()
+
     def test_household_validation(self):
         db.upsert_user(self.conn, {"id": "u1", "name": "n", "display_name": "B"})
         db.upsert_user(self.conn, {"id": "u2", "name": "m", "display_name": "a"})

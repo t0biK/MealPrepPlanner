@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,8 +19,6 @@ SAMPLE = {
     "image": IMAGE,
     "servings": 4,
     "total_minutes": 30,
-    "for_lunch": True,
-    "for_dinner": True,
     "tags": ["Nudeln", "Italienisch", "Schnell"],
     "ingredients": [
         {"amount": 400, "unit": "g", "name": "Spaghetti", "note": None},
@@ -65,8 +64,7 @@ class ValidateTest(unittest.TestCase):
     def test_minimal_draft_gets_defaults(self):
         draft, errors = self.validate({"format_version": 1, "title": " Brot ", "servings": 2})
         self.assertEqual(errors, {})
-        self.assertEqual((draft["title"], draft["source_kind"], draft["for_lunch"], draft["tags"]),
-                         ("Brot", "manual", True, []))
+        self.assertEqual((draft["title"], draft["source_kind"], draft["tags"]), ("Brot", "manual", []))
         self.assertNotIn("image_url", draft)
 
     def test_unknown_keys_dropped_and_non_object_rejected(self):
@@ -105,11 +103,11 @@ class ValidateTest(unittest.TestCase):
             self.assertRejected(with_(total_minutes=v), "total_minutes")
         self.assertEqual(self.validate(with_(total_minutes=None))[1], {})
 
-    def test_lunch_dinner(self):
-        self.assertRejected(with_(for_lunch=False, for_dinner=False), "for_lunch")
-        self.assertRejected(with_(for_lunch=1), "for_lunch")
-        self.assertRejected(with_(for_dinner="yes"), "for_dinner")
-        self.assertEqual(self.validate(with_(for_lunch=False))[1], {})
+    def test_old_meal_flags_are_dropped(self):
+        for flags in ({"for_lunch": False, "for_dinner": False}, {"for_lunch": 1, "for_dinner": "yes"}, {"for_lunch": True}):
+            draft, errors = self.validate(with_(**flags))
+            self.assertEqual(errors, {})
+            self.assertFalse({"for_lunch", "for_dinner"} & set(draft))
 
     def test_tags(self):
         draft, errors = self.validate(with_(tags=["nudeln", "NUDELN", "Schnell"]))
@@ -195,6 +193,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([i["name"] for i in got["ingredients"]], ["Spaghetti", "Eier", "Salz"])
         self.assertEqual(got["ingredients"][1], {"amount": 4, "unit": None, "name": "Eier", "note": "Größe M"})
         self.assertNotIn("image_url", got)
+        self.assertFalse({"for_lunch", "for_dinner"} & (set(got) | set(recipes.list_recipes(self.conn)[0])))  # M16: flags gone
         self.assertIsNone(recipes.get_recipe(self.conn, rid + 1))
 
     def test_update_replaces_children(self):
@@ -243,48 +242,56 @@ class StoreTest(unittest.TestCase):
         for bad in ("grillen", "", "  ", "x" * 51, None):
             with self.assertRaises(db.InvalidField):
                 recipes.create_tag(self.conn, bad)
-        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "BBQ", False, ALL)["name"], "BBQ")
-        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "bbq", False, ALL)["name"], "bbq")  # same tag, new case
+        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "BBQ")["name"], "BBQ")
+        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "bbq")["name"], "bbq")  # same tag, new case
         with self.assertRaises(db.InvalidField):
-            recipes.update_tag(self.conn, tag["id"], "Fleisch", False, ALL)
-        self.assertIsNone(recipes.update_tag(self.conn, 9999, "Foo", False, ALL))
+            recipes.update_tag(self.conn, tag["id"], "Fleisch")
+        self.assertIsNone(recipes.update_tag(self.conn, 9999, "Foo"))
 
     def test_tag_category_round_trip(self):
         tags = {t["name"]: t for t in recipes.list_tags(self.conn)}
         self.assertEqual(sorted(n for n, t in tags.items() if t["category"]),
                          sorted(["Schnell", "Meal Prep", "Sonntagsessen", "Leicht", "Proteinreich", "Lunchbox", "Ofengericht", "Gäste"]))
         self.assertFalse(tags["Nudeln"]["category"])
-        nudeln = tags["Nudeln"]["id"]
-        self.assertEqual(recipes.update_tag(self.conn, nudeln, "Nudeln", True, ALL), {"id": nudeln, "name": "Nudeln", "category": True, "slots": ALL})
-        self.assertTrue(next(t for t in recipes.list_tags(self.conn) if t["id"] == nudeln)["category"])
-        self.assertFalse(recipes.update_tag(self.conn, nudeln, "Nudeln", False, ALL)["category"])
+        vesper = recipes.create_tag(self.conn, "Vesper", True)  # a category and a tag are told apart when they are created
+        self.assertEqual(vesper, {"id": vesper["id"], "name": "Vesper", "category": True, "slots": ALL})
+        self.assertFalse(recipes.create_tag(self.conn, "Grillen")["category"])
+        self.assertFalse(recipes.create_tag(self.conn, "Grillen2", False)["category"])
+        self.assertTrue(next(t for t in recipes.list_tags(self.conn) if t["id"] == vesper["id"])["category"])
         for bad in (1, 0, None, "yes"):
             with self.assertRaises(db.InvalidField) as cm:
-                recipes.update_tag(self.conn, nudeln, "Nudeln", bad, ALL)
+                recipes.create_tag(self.conn, "Foo", bad)
             self.assertEqual(cm.exception.field, "category")
+        nudeln = tags["Nudeln"]["id"]  # updating never changes the flag
+        self.assertEqual(recipes.update_tag(self.conn, nudeln, "Nudeln"), {"id": nudeln, "name": "Nudeln", "category": False, "slots": ALL})
+        self.assertEqual(recipes.update_tag(self.conn, vesper["id"], "Abendbrot", ALL)["category"], True)
+        self.assertTrue(next(t for t in recipes.list_tags(self.conn) if t["id"] == vesper["id"])["category"])
 
     def test_tag_slots_round_trip_and_validation(self):
         tags = {t["name"]: t for t in recipes.list_tags(self.conn)}
         self.assertTrue(all(t["slots"] == ALL for t in tags.values()))  # NULL reads as all slots
-        self.assertEqual(recipes.create_tag(self.conn, "Vesper")["slots"], ALL)
+        self.assertEqual(recipes.create_tag(self.conn, "Vesper", True)["slots"], ALL)
         schnell = tags["Schnell"]["id"]
         dinners = [i % 2 == 1 for i in range(14)]
-        self.assertEqual(recipes.update_tag(self.conn, schnell, "Schnell", True, dinners)["slots"], dinners)
+        self.assertEqual(recipes.update_tag(self.conn, schnell, "Schnell", dinners)["slots"], dinners)
         self.assertEqual(next(t for t in recipes.list_tags(self.conn) if t["id"] == schnell)["slots"], dinners)
-        self.assertEqual(recipes.update_tag(self.conn, schnell, "Schnell", True, ALL)["slots"], ALL)
+        self.assertEqual(recipes.update_tag(self.conn, schnell, "Schnell", ALL)["slots"], ALL)
         self.assertIsNone(self.conn.execute("SELECT slots FROM tags WHERE id = ?", (schnell,)).fetchone()[0])  # all ticked = NULL
         for bad in (ALL[:13], ALL + [True], [1] * 14, [True] * 13 + [None], ["x"] * 14, "x" * 14, None, {}):
             with self.assertRaises(db.InvalidField, msg=bad) as cm:
-                recipes.update_tag(self.conn, schnell, "Schnell", True, bad)
+                recipes.update_tag(self.conn, schnell, "Schnell", bad)
             self.assertEqual(cm.exception.field, "slots")
+        with self.assertRaises(db.InvalidField) as cm:  # slots belong to categories only
+            recipes.update_tag(self.conn, tags["Nudeln"]["id"], "Nudeln", dinners)
+        self.assertEqual(cm.exception.field, "slots")
 
     def test_allowed_slots_of_a_recipe_are_the_intersection_of_its_categories(self):
         ids = {t["name"]: t["id"] for t in recipes.list_tags(self.conn)}
         dinners = [i % 2 == 1 for i in range(14)]
         monday_to_wednesday = [i < 6 for i in range(14)]
-        recipes.update_tag(self.conn, ids["Schnell"], "Schnell", True, dinners)
-        recipes.update_tag(self.conn, ids["Leicht"], "Leicht", True, monday_to_wednesday)
-        recipes.update_tag(self.conn, ids["Nudeln"], "Nudeln", False, [False] * 14)  # no category: its slots are ignored
+        recipes.update_tag(self.conn, ids["Schnell"], "Schnell", dinners)
+        recipes.update_tag(self.conn, ids["Leicht"], "Leicht", monday_to_wednesday)
+        self.conn.execute("UPDATE tags SET slots = ? WHERE name = 'Nudeln'", (json.dumps([False] * 14),))  # no category: ignored
 
         def slots(**kw):
             rid = self.make(**kw)
@@ -295,8 +302,6 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(slots(tags=["Schnell", "Leicht", "Nudeln"]), [i in (1, 3, 5) for i in range(14)])
         self.assertEqual(slots(tags=["Nudeln"]), ALL)
         self.assertEqual(slots(tags=[]), ALL)  # no categories
-        recipes.update_tag(self.conn, ids["Schnell"], "Schnell", False, dinners)  # it stops being a category: slots do not count
-        self.assertEqual(slots(tags=["Schnell"]), ALL)
 
     def test_auto_categories_at_the_boundaries(self):
         auto = lambda minutes=None, **n: recipes.auto_categories({"total_minutes": minutes, "nutrition": {"source": "page", **n} if n else None})

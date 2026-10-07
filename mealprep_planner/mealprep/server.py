@@ -330,12 +330,15 @@ def api_list_tags(h, m):
 
 
 def api_create_tag(h, m):
-    h.send_json(201, recipes.create_tag(h.conn, _body_dict(h).get("name")))
+    body = _body_dict(h)
+    h.send_json(201, recipes.create_tag(h.conn, body.get("name"), body.get("category", False)))
 
 
 def api_update_tag(h, m):
     body = _body_dict(h)
-    tag = recipes.update_tag(h.conn, int(m.group(1)), body.get("name"), body.get("category"), body.get("slots"))
+    if "category" in body:  # the flag is fixed when the entry is created
+        raise db.InvalidField("category")
+    tag = recipes.update_tag(h.conn, int(m.group(1)), body.get("name"), body.get("slots"))
     if tag is None:
         raise ApiError(404, "not_found")
     h.send_json(200, tag)

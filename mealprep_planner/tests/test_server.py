@@ -500,11 +500,11 @@ class DevServerTest(unittest.TestCase):
         status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})
         self.assertEqual(status, 201)
         self.assertEqual(self.call("POST", "/api/tags", {"name": "servertag"})[1]["field"], "name")
-        self.assertEqual(self.call("PUT", f"/api/tags/{tag['id']}", {"name": "Renamed", "category": False, "slots": [True] * 14})[1]["name"], "Renamed")
+        self.assertEqual(self.call("PUT", f"/api/tags/{tag['id']}", {"name": "Renamed"})[1]["name"], "Renamed")
         self.assertIn("Renamed", [t["name"] for t in self.call("GET", "/api/tags")[1]])
         self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 200)
         self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 404)
-        self.assertEqual(self.call("PUT", "/api/tags/999999", {"name": "x", "category": False, "slots": [True] * 14})[0], 404)
+        self.assertEqual(self.call("PUT", "/api/tags/999999", {"name": "x"})[0], 404)
 
     def test_tag_category_and_slots(self):
         tags = {t["name"]: t for t in self.call("GET", "/api/tags")[1]}
@@ -512,20 +512,29 @@ class DevServerTest(unittest.TestCase):
                          {"Schnell", "Meal Prep", "Sonntagsessen", "Leicht", "Proteinreich", "Lunchbox", "Ofengericht", "Gäste"})
         quick = tags["Schnell"]["id"]
         self.assertFalse(self.call("POST", "/api/tags", {"name": "SlotTag"})[1]["category"])
-        for body in ({"name": "Schnell"}, {"name": "Schnell", "category": 1}, {"name": "Schnell", "category": None}):
+        self.assertFalse(self.call("POST", "/api/tags", {"name": "SlotTag2", "category": False})[1]["category"])
+        vesper = self.call("POST", "/api/tags", {"name": "Vesper", "category": True})[1]  # category or tag is fixed on creation
+        self.assertEqual((vesper["category"], vesper["slots"]), (True, [True] * 14))
+        self.assertEqual(self.call("POST", "/api/tags", {"name": "Foo", "category": 1}), (400, {"error": "invalid_field", "field": "category"}))
+        for body in ({"name": "Schnell", "category": True, "slots": [True] * 14}, {"name": "Schnell", "category": False},
+                     {"name": "Schnell", "category": 1}, {"name": "Schnell", "category": None}):  # PUT never changes the flag
             self.assertEqual(self.call("PUT", f"/api/tags/{quick}", body), (400, {"error": "invalid_field", "field": "category"}))
+        self.assertEqual(self.call("PUT", f"/api/tags/{vesper['id']}", {"name": "Vesper", "slots": [i % 2 == 1 for i in range(14)]})[1]["category"], True)
+        plain = self.call("POST", "/api/tags", {"name": "Grillen"})[1]["id"]
+        self.assertEqual(self.call("PUT", f"/api/tags/{plain}", {"name": "Grillen", "slots": [True] * 14}),  # slots belong to categories
+                         (400, {"error": "invalid_field", "field": "slots"}))
 
         all_slots = [True] * 14
         self.assertEqual(self.call("GET", "/api/tags")[1][0]["slots"], all_slots)  # NULL reads as all slots
         dinners = [i % 2 == 1 for i in range(14)]
         for bad in (None, all_slots[:13], all_slots + [True], [1] * 14, "x" * 14):
-            self.assertEqual(self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True, "slots": bad}),
+            self.assertEqual(self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "slots": bad}),
                              (400, {"error": "invalid_field", "field": "slots"}))
         try:
-            self.assertEqual(self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True, "slots": dinners})[1]["slots"], dinners)
+            self.assertEqual(self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "slots": dinners})[1]["slots"], dinners)
             self.assertEqual(next(t for t in self.call("GET", "/api/tags")[1] if t["id"] == quick)["slots"], dinners)
         finally:
-            self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True, "slots": all_slots})
+            self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "slots": all_slots})
 
         # the M13 slot rules are gone
         self.assertEqual(self.call("POST", "/api/plans/2030-W20/slots/0/dinner", {"action": "rule", "tag_id": quick}),

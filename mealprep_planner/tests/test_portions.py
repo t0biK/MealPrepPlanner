@@ -115,7 +115,7 @@ class FitTest(unittest.TestCase):
         return {"week": WEEK, "status": "draft", "slots": slots, "canteen": {}}
 
     def gen(self, kcals, seed=1, people=PEOPLE, eaters=("u",)):
-        recipes = [{"id": i, "for_lunch": True, "for_dinner": True, "archived": False, "tags": [], "kcal": k}
+        recipes = [{"id": i, "archived": False, "tags": [], "kcal": k}
                    for i, k in kcals.items()]
         out = planner.generate(self.one_slot_plan(eaters), recipes, {}, ["u"], [], {"repeat_window_days": 14, "new_per_week": 0},
                                random.Random(seed), MONDAY, people)
@@ -168,7 +168,7 @@ class FitTest(unittest.TestCase):
 
     def test_reroll_uses_the_fit(self):
         plan = self.one_slot_plan()
-        recipes = [{"id": i, "for_lunch": True, "for_dinner": True, "archived": False, "tags": [], "kcal": k}
+        recipes = [{"id": i, "archived": False, "tags": [], "kcal": k}
                    for i, k in {1: 1700, 2: 500}.items()]
         plan["slots"][0]["recipe_id"] = 1
         out = planner.reroll(plan, 0, "lunch", recipes, {}, ["u"], [], {"repeat_window_days": 14}, random.Random(1), self.PEOPLE)
