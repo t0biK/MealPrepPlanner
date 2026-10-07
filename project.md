@@ -43,7 +43,7 @@ All decided in the planning session on 2026-10-06. Rows marked "(agreed 2026-10-
 | Canteen lunch | Per person and day, "Kantine" marks a lunch eaten at the canteen: it counts as that person's canteen kcal (default 700, range 0–2000) toward the target, removes them from that day's planned lunch and adds nothing to shopping. Each person can set default canteen weekdays; new weeks start from them. A planned meal a person is not part of otherwise counts as 0 kcal (M12). (agreed 2026-10-06) |
 | Personal portions | Per person and day, all planned meals get the same portion factor = (kcal target − canteen kcal) ÷ sum of the meals' kcal per portion, rounded to ¼ and limited to 0.5–2. Without a target the factor is 1; if a meal of that day has no kcal, the factor is 1 and the app suggests "Nährwerte schätzen". Portions are suggestions in recipe portions, not grams (M12). (agreed 2026-10-06) |
 | Web import | Own parser (stdlib) for schema.org `Recipe` JSON-LD. Otherwise OpenGraph title/image as prefill (from M4 also AI on the page text). |
-| Video / social links | TikTok and YouTube via oEmbed (caption, thumbnail). Instagram: link only, caption pasted by hand. Ingredients and steps come from the text via AI. |
+| Video / social links | TikTok and YouTube via oEmbed (caption, thumbnail). Instagram: link only, caption pasted by hand. Ingredients and steps come from the text via AI. From M17, with AI on, the app also reads the public video page for extra text: TikTok's auto-transcript (subtitle track), YouTube's full video description. The AI gets it after the caption; the caption and description win, the transcript only fills in missing ingredients and steps. Any failure there silently means caption only. Each source is one small function in a registry, so further sources are easy to add (M17). (agreed 2026-10-07) |
 | AI | Via HA `ai_task.generate_data`; the entity is chosen in the settings, so the app holds no API key. Used for: free text (captions, pasted text, pages without JSON-LD), clean-up of **every** import (split ingredients, map to known names, tags, lunch/dinner flags), nutrition when the page has none (marked "geschätzt") and the "Nährwerte schätzen" button (M10); from M13 it also suggests categories. Not used for suggestions. If AI is off or fails, the rule-based result is kept. All AI output is validated. (agreed 2026-10-06) |
 | Review | Every import becomes a draft that a person reviews and saves. Nothing enters the collection unreviewed. |
 | Steps | Ingredients, steps and source link are stored; the recipe page doubles as cook view. |
@@ -78,7 +78,7 @@ All decided in the planning session on 2026-10-06. Rows marked "(agreed 2026-10-
 ## 4. Out of scope
 
 - A native or installable mobile app / PWA; appearing directly in the phone's share sheet (sharing goes through the HA companion app).
-- Reading ingredients from video, audio or images (no video download, transcription, OCR); logging in to TikTok/Instagram/YouTube; scraping beyond oEmbed.
+- Reading ingredients from video, audio or images (no video download, own transcription, OCR); logging in to TikTok/Instagram/YouTube; scraping beyond oEmbed, except the video-page text of M17; YouTube transcripts (their caption URLs need a proof-of-origin token, i.e. running YouTube's JavaScript). (agreed 2026-10-07)
 - Export/import files, sharing recipes with other households, importing from other recipe apps.
 - Automatic Bring! pushes (from M10), two-way Bring! sync, automatic removal of Bring! items, Bring! notifications; sending the whole week through Bring!'s own import screen; any public endpoint for Bring!. (agreed 2026-10-06)
 - Inventory/stock tracking with amounts (only the pantry name list).
@@ -613,7 +613,7 @@ MealPrepPlanner/                      git repo = HA app repository
     │   ├── ha.py                     HA REST client                                     (M1)
     │   ├── ingredients.py            parse, scale, format, aggregate                    (M2, M8)
     │   ├── recipes.py                validate_draft, recipe/tag queries, categories, Bring! import link (M2, M10, M13)
-    │   ├── importer.py               check_url, fetch, JSON-LD/OpenGraph/oEmbed, images (M3, M4)
+    │   ├── importer.py               check_url, fetch, JSON-LD/OpenGraph/oEmbed, images (M3, M4), video-page text (M17)
     │   ├── worker.py                 background loop: jobs, inbox, sensor               (M3, M5, M9)
     │   ├── ai.py                     ai_task prompts, nutrition guess, output validation (M4, M10, M13)
     │   ├── planner.py                prediction, plan generation, personal portions, sensor payload (M6, M7, M9, M12–M14)
@@ -662,6 +662,10 @@ Scope change "Category slots" (agreed 2026-10-07):
 Scope change "Simple flow" (agreed 2026-10-07):
 
 - [ ] M16 Simplify: tags vs. categories, compact week, grouped settings
+
+Scope change "Video details" (agreed 2026-10-07):
+
+- [ ] M17 Video details: TikTok transcript, YouTube description
 
 Every milestone: bump `VERSION` (and from M1 `config.yaml`) to `0.<n>.0` and add its `CHANGELOG.md` entry (§2); every new UI string goes into both `de.json` and `en.json`; all existing tests keep passing. "(manual)" marks checks done by hand, "(manual, HA)" on the HA device, "(manual, phone)" on a phone.
 
@@ -1119,6 +1123,60 @@ Goal: as simple as possible. One concept per question: **categories** answer "wh
 - [ ] A full week on the phone is about 2–2.5 screens; every slot action is reachable via "⋯" (manual, phone).
 - [ ] Settings sections are collapsed except Haushalt (manual).
 - [x] All tests pass.
+
+### M17 – Video details: TikTok transcript, YouTube description (agreed 2026-10-07)
+
+Goal: many video captions list only ingredients (or only a title, on YouTube); the steps are spoken in the video or sit in the full description. With AI on, the importer reads that extra text from the public video page and lets the AI fill in what the caption lacks. Adding another source later = one function + one registry entry.
+
+**Build**
+- `importer.py`:
+  - Registry `VIDEO_PAGE_TEXT = {kind: (heading, fn)}` with `fn(page_html) -> str`. Each `fn` never raises and returns "" on any problem. Entries:
+    - `"tiktok": ("Transkript:", tiktok_transcript)`
+    - `"youtube": ("Videobeschreibung:", youtube_description)`
+  - `tiktok_transcript(page_html)`:
+    - Reads the JSON array after the first `"subtitleInfos":` with `json.JSONDecoder().raw_decode`.
+    - Keeps entries with `Format` `webvtt` and an http(s) `Url`; takes the first whose `Source` is not `MT` (the original, not a machine translation), else the first.
+    - Fetches it via `fetch` (SSRF guard, ≤ 256 KB) and drops the `WEBVTT` header, timestamp lines (`-->`), cue numbers and tags (`_clean`).
+    - Joins the cue texts with spaces, ≤ 5000 chars.
+  - `youtube_description(page_html)`: the JSON string after the first `"shortDescription":` (via `raw_decode`), line structure kept (`_lines`), ≤ 5000 chars.
+  - `build_draft`, TikTok/YouTube branch:
+    - oEmbed as before.
+    - With AI on and the kind in the registry, the video page is fetched (a short link's already fetched page is reused, not fetched again; `FetchError` → no extra text) and `fn` is called.
+    - The AI text is the caption, then `"\n\n<heading>\n<text>"` for a non-empty extra.
+    - Caption or extra non-empty → `from_text`, whose rule-based fallback uses the caption lines (no caption → title = host).
+    - Both empty → the `paste_caption` draft as today.
+    - With AI off nothing changes: no page fetch, caption rules only.
+    - No new warning codes.
+- `ai.py` `_text_prompt`: one rule for the sections:
+  - "Videobeschreibung:" is the creator's full description and counts like the caption.
+  - "Transkript:" is automatically recognised speech and may contain errors.
+  - Caption and description win; the transcript only fills in missing ingredients and steps.
+- Bump version to 0.17.0.
+
+**Tests added**
+- `test_importer.py` (self-written fixtures, no network):
+  - `tiktok_transcript`:
+    - original track chosen over `MT`
+    - `/`-escaped URLs decoded
+    - header, timestamps, cue numbers and tags removed
+    - no track, malformed JSON or non-list → "" without a fetch
+    - fetch failure → ""
+    - 5000-char limit
+  - `youtube_description`: escaped newlines and quotes; missing or malformed → ""; 5000-char limit.
+  - `build_draft`:
+    - TikTok transcript and YouTube description reach the AI after the caption.
+    - An empty caption with extra text still gives an AI draft.
+    - AI off → no page fetch.
+    - Page fetch failure → caption-only draft, no warning.
+    - A short link's page is fetched only once.
+    - A stub source added to the registry (`mock.patch.dict`) reaches the AI without other code changes.
+- `test_ai.py`: the text prompt explains both sections.
+
+**Acceptance**
+- [ ] A TikTok recipe whose caption lists only ingredients and nutrition, with the steps spoken: the draft has steps, and the caption's ingredients and nutrition are unchanged (manual, HA).
+- [ ] A YouTube recipe video with the recipe in its description: the draft has ingredients and steps without pasting anything (manual, HA).
+- [ ] With AI off, TikTok and YouTube imports behave as before (manual).
+- [ ] All tests pass.
 
 ## 10. Testing
 
