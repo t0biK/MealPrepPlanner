@@ -29,7 +29,7 @@ All decided in the planning session on 2026-10-06. Rows marked "(agreed 2026-10-
 | Access | Ingress only, no exposed port. Requests are accepted only from the Ingress proxy `172.30.32.2`. |
 | Meal slots | Lunch + dinner, Mon–Sun (14 slots). A default slot pattern (7×2 grid) in the settings; single slots can be switched off ("kein Kochen") per week. |
 | Leftovers | One recipe per slot. A slot can be marked "Reste von …" an earlier slot of the same week: it shows the same recipe, its portions are added to the cooking slot, and it adds nothing to the shopping list (M14). No automatic spans, no batch-prep day. (agreed 2026-10-06) |
-| Lunch/dinner suitability | Per-recipe flags "Mittag" / "Abend" (default: both). The planner fills a slot only with matching recipes. |
+| Lunch/dinner suitability | Per-recipe flags "Mittag" / "Abend" (default: both). The planner fills a slot only with matching recipes. **Replaced in M16:** the flags are gone; only categories decide when a recipe fits, a recipe without a category fits every meal (agreed 2026-10-07). |
 | Week | ISO week, Monday–Sunday, written `YYYY-Www`. |
 | Plan flow | Manual: "Vorschlag erstellen" → reroll / lock / replace / switch off / adjust eaters → "Bestätigen". Past slots of a confirmed plan count as cooked unless marked "ausgefallen". Sending to Bring! is a separate button (M10). (agreed 2026-10-06) |
 | Learning | Transparent scoring: stars, per-person tag preferences that predict unrated recipes, a repeat window and a quota of new recipes. Every suggestion shows why it was picked. No implicit signals, no machine learning. |
@@ -47,7 +47,7 @@ All decided in the planning session on 2026-10-06. Rows marked "(agreed 2026-10-
 | Review | Every import becomes a draft that a person reviews and saves. Nothing enters the collection unreviewed. |
 | Steps | Ingredients, steps and source link are stored; the recipe page doubles as cook view. |
 | Images | Local copy of the recipe image / thumbnail, ≤ 2 MB, JPEG/PNG/WebP verified by magic bytes. |
-| Tags & categories | Curated, editable tag list (25 defaults, §6). Import and AI pre-select from it. From M13, eight tags are categories: Schnell, Meal Prep, Sonntagsessen, Leicht, Proteinreich, Lunchbox, Ofengericht, Gäste; they are shown as chips, a recipe can have several, and any tag can be made a category in the tag editor (e.g. "Vesper"). From M15 each category carries a slot grid that limits where the planner puts its recipes (agreed 2026-10-07). Schnell (≤ 30 min), Leicht (≤ 500 kcal per portion) and Proteinreich (≥ 25 % of kcal from protein) are pre-ticked automatically, the others by AI or by hand. (agreed 2026-10-06) |
+| Tags & categories | Curated, editable tag list (25 defaults, §6). Import and AI pre-select from it. From M13, eight tags are categories: Schnell, Meal Prep, Sonntagsessen, Leicht, Proteinreich, Lunchbox, Ofengericht, Gäste; they are shown as chips, a recipe can have several, and any tag can be made a category in the tag editor (e.g. "Vesper"). From M15 each category carries a slot grid that limits where the planner puts its recipes (agreed 2026-10-07). Schnell (≤ 30 min), Leicht (≤ 500 kcal per portion) and Proteinreich (≥ 25 % of kcal from protein) are pre-ticked automatically, the others by AI or by hand. (agreed 2026-10-06) From M16 tags and categories are two separate things in the UI: categories ("Wann passt es?") have their own list and editor, tags (Fleisch, Italienisch, …) their own; a tag can no longer be turned into a category or back (agreed 2026-10-07). |
 | Ingredient names | Free text with suggestions of already-used names (native `<datalist>`) in the edit form. Shopping merge = same name (case-insensitive) plus unit conversion g/kg and ml/cl/dl/l. |
 | Nutrition | kcal, protein, fat, carbs per portion: from the page, else an AI estimate ("geschätzt"). A "Nährwerte schätzen" button re-estimates any recipe; page values are overwritten only after confirming (M10). Shown per recipe and as day totals in the week view; with targets, per person and day against the targets (M12). (agreed 2026-10-06) |
 | Bulk import | Paste many links (one per line, max 50) → draft queue. |
@@ -388,7 +388,7 @@ Validation (`recipes.validate_draft`), same for API input, imports and AI result
 | `image` | `null` or `^[0-9a-f]{64}\.(jpg\|png\|webp)$` and the file exists |
 | `servings` | integer 1–50 |
 | `total_minutes` | `null` or integer 1–1440 |
-| `for_lunch`, `for_dinner` | booleans, at least one `true` |
+| `for_lunch`, `for_dinner` | booleans, at least one `true`. **From M16 dropped like unknown keys** (categories decide when a recipe fits) |
 | `tags` | ≤ 15 names, each an existing tag (case-insensitive) |
 | `ingredients` | ≤ 100 items; `amount` `null` or 0 < x ≤ 100000; `unit` `null` or a canonical unit; `name` 1–100 chars; `note` `null` or ≤ 200 chars |
 | `steps` | ≤ 50 strings, each 1–2000 chars |
@@ -656,6 +656,10 @@ Scope change "Weight Loss Journey" (agreed 2026-10-06):
 Scope change "Category slots" (agreed 2026-10-07):
 
 - [ ] M15 Category slots (replaces the M13 slot rules)
+
+Scope change "Simple flow" (agreed 2026-10-07):
+
+- [ ] M16 Simplify: tags vs. categories, compact week, grouped settings
 
 Every milestone: bump `VERSION` (and from M1 `config.yaml`) to `0.<n>.0`; every new UI string goes into both `de.json` and `en.json`; all existing tests keep passing. "(manual)" marks checks done by hand, "(manual, HA)" on the HA device, "(manual, phone)" on a phone.
 
@@ -1056,6 +1060,63 @@ Goal: a category says where its recipes belong in the week (e.g. "Vesper" only f
 - [ ] A recipe with two categories only appears in slots both allow (manual).
 - [ ] The settings and week view no longer show slot rules (manual).
 - [x] All tests pass.
+
+### M16 – Simplify: tags vs. categories, compact week, grouped settings (agreed 2026-10-07)
+
+Goal: as simple as possible. One concept per question: **categories** answer "when do we eat this?", **tags** describe the dish (and keep feeding the taste prediction, search and import pre-selection). The week fits on about two phone screens. No new features.
+
+**Build**
+- Storage of tags and categories stays as is (`tags.category`, `tags.slots`); only the API and UI separate them. The `category` flag is fixed when an entry is created: `POST api/tags {name, category}`; `PUT api/tags/<id>` takes `{name}` for a tag and `{name, slots}` for a category and no longer changes `category` (a `category` key → 400 `invalid_field`).
+- Mittag/Abend flags removed:
+  - Migration 12: `UPDATE recipes SET for_lunch = 1, for_dinner = 1`. The columns stay in the schema but are no longer read or written (dropping them needs a table rebuild because of the table `CHECK`; not worth it).
+  - Draft format: `for_lunch`/`for_dinner` are dropped like unknown keys (old drafts and clients keep working); `GET api/recipes…` no longer returns them.
+  - Planner: the meal match in candidate rule step 2 (§9 M7) is only the category slot mask (M15). A recipe without a category fits every slot.
+  - AI: the prompts no longer ask for lunch/dinner suitability.
+- Recipe form and draft review:
+  - Card "Wann passt es?" with only the category chips, plus the hint "Ohne Kategorie passt das Rezept zu jeder Mahlzeit."
+  - Separate card "Tags" with the other chips.
+  - Mittag/Abend switches removed.
+- Recipe page and cards: categories and tags on separate lines; the "nur mittags/abends" text is gone.
+- Week view:
+  - Each meal is one compact row: small thumbnail (not full width), title (link to the recipe with the cooked portions), short reason line, cooked portions, and a "⋯" button.
+  - Tapping "⋯" opens a native `<dialog>` with every slot action:
+    - swap: 🎲 reroll, ✏️ replace
+    - lock, "Reste von …", switch off / on
+    - eater chips with portions per person, guests stepper
+    - "Kantine" for that day (lunch only), "Ausgefallen" (confirmed plans, past and today only)
+    - "Nährwerte schätzen" link
+  - The same rules as today decide which actions are shown or refused.
+  - A switched-off meal is one muted row ("kein Kochen") whose "⋯" offers "einschalten".
+  - Day header with date and per-person totals in one line.
+  - Week navigation, "Vorschlag erstellen", "Bestätigen" and "🛒 An Bring! senden" stay at the top.
+  - Goal: a 14-meal week ≤ about 2.5 phone screens (375 × 812) high.
+- Settings regrouped into native `<details>` sections; only "Haushalt" is open by default:
+  - Haushalt
+  - Wochenplanung: Mahlzeiten pro Woche, Wiederholungsabstand, neue Rezepte pro Woche
+  - Rezepte:
+    - "Kategorien": a list where tapping a name opens its 7×2 grid, plus rename / delete / add.
+    - "Tags": a list with rename / delete / add.
+    - "Standard-Portionen (für Importe ohne Angabe)".
+  - Vorrat
+  - Verbindungen: Bring!-Liste, Rezept-Inbox, KI, Systemcheck
+  - Sprache
+- No "Kategorie" checkbox anywhere.
+- Fix: amounts of 1 use the singular ("1 Portion", not "1 Portionen") wherever cooked portions are shown.
+- Bump version to 0.16.0.
+
+**Tests added**
+- `test_db.py`: migration 12 on a DB at version 11 sets both flags to 1 on every recipe.
+- `test_recipes.py`: drafts with `for_lunch`/`for_dinner` still validate, and the keys are dropped; creating a category vs. a tag; `PUT` cannot change `category`; `slots` only for categories.
+- `test_planner.py`: a recipe without a category fills lunch and dinner; the old flag no longer restricts anything; the existing M15 mask tests still pass.
+- `test_ai.py`: the prompts contain no lunch/dinner question; AI output with these keys is accepted and the keys are dropped.
+- Tests that only covered the removed flags are deleted, not skipped.
+
+**Acceptance**
+- [ ] The recipe form shows "Wann passt es?" (categories only) and "Tags" as two separate cards, with no Mittag/Abend switches (manual, phone).
+- [ ] Settings has no "Kategorie" checkbox; a new category "Vesper" with only the dinners ticked keeps Vesper recipes out of lunches (manual).
+- [ ] A full week on the phone is about 2–2.5 screens; every slot action is reachable via "⋯" (manual, phone).
+- [ ] Settings sections are collapsed except Haushalt (manual).
+- [ ] All tests pass.
 
 ## 10. Testing
 
