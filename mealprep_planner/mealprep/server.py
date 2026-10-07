@@ -333,8 +333,9 @@ def api_create_tag(h, m):
     h.send_json(201, recipes.create_tag(h.conn, _body_dict(h).get("name")))
 
 
-def api_rename_tag(h, m):
-    tag = recipes.rename_tag(h.conn, int(m.group(1)), _body_dict(h).get("name"))
+def api_update_tag(h, m):
+    body = _body_dict(h)
+    tag = recipes.update_tag(h.conn, int(m.group(1)), body.get("name"), body.get("category"))
     if tag is None:
         raise ApiError(404, "not_found")
     h.send_json(200, tag)
@@ -477,7 +478,8 @@ def api_import_text(h, m):
 
 def api_estimate_nutrition(h, m):
     """AI guess of the nutrition per portion for a draft (title, servings, ingredients); saves nothing (M10)."""
-    draft, errors = recipes.validate_draft(_body_dict(h).get("draft"), [t["name"] for t in recipes.list_tags(h.conn)])
+    tag_names = [t["name"] for t in recipes.list_tags(h.conn)]
+    draft, errors = recipes.validate_draft(_body_dict(h).get("draft"), tag_names)
     if errors:
         raise db.InvalidField(next(iter(errors)) or "draft")
     if not draft["ingredients"]:
@@ -486,7 +488,7 @@ def api_estimate_nutrition(h, m):
     nutrition = ai.estimate_nutrition(draft, settings["ai_entity"] if settings["ai_enabled"] else None)
     if nutrition is None:
         raise ApiError(502, "ai_failed")
-    h.send_json(200, {"nutrition": nutrition})
+    h.send_json(200, {"nutrition": nutrition, "suggested_tags": recipes.suggested_tags({**draft, "nutrition": nutrition}, tag_names)})
 
 
 def api_image(h, m):
@@ -637,7 +639,7 @@ ROUTES = [
     ("POST", re.compile(r"^/api/recipes/(\d+)/restore$"), _set_archived(False)),
     ("GET", re.compile(r"^/api/tags$"), api_list_tags),
     ("POST", re.compile(r"^/api/tags$"), api_create_tag),
-    ("PUT", re.compile(r"^/api/tags/(\d+)$"), api_rename_tag),
+    ("PUT", re.compile(r"^/api/tags/(\d+)$"), api_update_tag),
     ("DELETE", re.compile(r"^/api/tags/(\d+)$"), api_delete_tag),
     ("GET", re.compile(r"^/api/ingredient-names$"), api_ingredient_names),
     ("GET", re.compile(r"^/api/units$"), api_units),

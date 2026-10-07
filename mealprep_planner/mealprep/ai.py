@@ -6,7 +6,7 @@ from .ingredients import _ALIASES, UNITS, fmt_amount
 
 TIMEOUT = 60
 MAX_KNOWN_NAMES = 500
-MAX_TAGS = 6
+MAX_TAGS = 8
 
 SCHEMA = (
     '{"title": "Spaghetti Carbonara", "servings": 4, "total_minutes": 30, "for_lunch": true, "for_dinner": true, '
@@ -32,6 +32,9 @@ def _rules(known_names, tag_names):
         "Bekannte Namen: " + json.dumps(known_names[:MAX_KNOWN_NAMES], ensure_ascii=False) + "\n"
         f"- Wähle höchstens {MAX_TAGS} passende Tags, ausschliesslich aus dieser Liste: "
         + json.dumps(tag_names, ensure_ascii=False) + "\n"
+        "- Beurteile anhand des Rezepts, ob diese Kategorien zutreffen, und wähle sie dann als Tags: Meal Prep (vorkochbar, "
+        "2-3 Tage haltbar), Sonntagsessen (aufwendiger, Genuss), Lunchbox (kalt oder transportabel), Ofengericht "
+        "(wenig Aufwand, aus dem Ofen), Gäste (geeignet für Besuch).\n"
         "- Setze for_lunch und for_dinner danach, ob das Gericht mittags und/oder abends passt (mindestens eines true).\n"
         "- nutrition: Schätze kcal, protein_g, fat_g und carbs_g pro Portion nur, wenn sie unten fehlen, sonst null.\n"
         "- Erfinde keine Zutaten, die nicht in der Quelle stehen.\n"

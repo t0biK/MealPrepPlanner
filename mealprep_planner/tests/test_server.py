@@ -448,11 +448,13 @@ class DevServerTest(unittest.TestCase):
         try:
             with mock.patch.object(ha, "call_service", stub):
                 status, body = post({"draft": draft})
-                self.assertEqual((status, body), (200, {"nutrition": {"kcal": 640, "protein_g": 22, "fat_g": None, "carbs_g": 90, "source": "ai"}}))
+                self.assertEqual((status, body), (200, {"nutrition": {"kcal": 640, "protein_g": 22, "fat_g": None, "carbs_g": 90, "source": "ai"},
+                                                        "suggested_tags": []}))
                 self.assertIn("Schätzung", calls[0])
+                self.assertEqual(post({"draft": {**draft, "total_minutes": 20}})[1]["suggested_tags"], ["Schnell"])  # M13: automatic categories
                 self.call("PUT", "/api/settings", {"ai_enabled": False})
                 self.assertEqual(post({"draft": draft}), (502, {"error": "ai_failed"}))
-                self.assertEqual(len(calls), 1)  # AI switched off: no call
+                self.assertEqual(len(calls), 2)  # AI switched off: no call
         finally:
             self.call("PUT", "/api/settings", {"ai_entity": None, "ai_enabled": True})
         self.assertEqual(len(self.call("GET", "/api/recipes")[1]), before)  # nothing is saved
@@ -479,11 +481,44 @@ class DevServerTest(unittest.TestCase):
         status, tag = self.call("POST", "/api/tags", {"name": "ServerTag"})
         self.assertEqual(status, 201)
         self.assertEqual(self.call("POST", "/api/tags", {"name": "servertag"})[1]["field"], "name")
-        self.assertEqual(self.call("PUT", f"/api/tags/{tag['id']}", {"name": "Renamed"})[1]["name"], "Renamed")
+        self.assertEqual(self.call("PUT", f"/api/tags/{tag['id']}", {"name": "Renamed", "category": False})[1]["name"], "Renamed")
         self.assertIn("Renamed", [t["name"] for t in self.call("GET", "/api/tags")[1]])
         self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 200)
         self.assertEqual(self.call("DELETE", f"/api/tags/{tag['id']}")[0], 404)
-        self.assertEqual(self.call("PUT", "/api/tags/999999", {"name": "x"})[0], 404)
+        self.assertEqual(self.call("PUT", "/api/tags/999999", {"name": "x", "category": False})[0], 404)
+
+    def test_tag_category_and_slot_rules(self):
+        tags = {t["name"]: t for t in self.call("GET", "/api/tags")[1]}
+        self.assertEqual({n for n, t in tags.items() if t["category"]},
+                         {"Schnell", "Meal Prep", "Sonntagsessen", "Leicht", "Proteinreich", "Lunchbox", "Ofengericht", "Gäste"})
+        quick, plain = tags["Schnell"]["id"], tags["Nudeln"]["id"]
+        self.assertFalse(self.call("POST", "/api/tags", {"name": "RuleTag"})[1]["category"])
+        for body in ({"name": "Schnell"}, {"name": "Schnell", "category": 1}, {"name": "Schnell", "category": None}):
+            self.assertEqual(self.call("PUT", f"/api/tags/{quick}", body), (400, {"error": "invalid_field", "field": "category"}))
+
+        week = "2030-W20"
+        slot = lambda body, day=0: self.call("POST", f"/api/plans/{week}/slots/{day}/dinner", body)
+        status, plan = slot({"action": "rule", "tag_id": quick})
+        self.assertEqual((status, self.plan_slot(plan, 0, "dinner")["rule"], self.plan_slot(plan, 0, "lunch")["rule"]), (200, "Schnell", None))
+        for bad in (plain, 999999, "1", True):  # only category tags
+            self.assertEqual(slot({"action": "rule", "tag_id": bad}), (400, {"error": "invalid_field", "field": "tag_id"}))
+        self.assertEqual(slot({"action": "rule"})[1]["slots"][1]["rule"], None)  # no tag_id = no rule
+        slot({"action": "rule", "tag_id": quick})
+
+        rules = [quick if i == 3 else None for i in range(14)]
+        self.assertEqual(self.call("PUT", "/api/settings", {"slot_rules": rules})[1]["slot_rules"], rules)
+        try:
+            for bad in (rules[:13], [plain] + [None] * 13, ["x"] * 14, [True] + [None] * 13, "no"):
+                self.assertEqual(self.call("PUT", "/api/settings", {"slot_rules": bad}), (400, {"error": "invalid_field", "field": "slot_rules"}))
+            new = self.call("GET", "/api/plans/2030-W21")[1]  # a new week copies the rules
+            self.assertEqual([s["rule"] for s in new["slots"]], ["Schnell" if i == 3 else None for i in range(14)])
+            self.assertEqual(self.call("GET", "/api/settings")[1]["slot_rules"], rules)  # a rule changed in a week is local to it
+            self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": False})  # no category, no rule
+            self.assertEqual(self.call("GET", "/api/settings")[1]["slot_rules"], [None] * 14)
+            self.assertIsNone(self.plan_slot(self.call("GET", f"/api/plans/{week}")[1], 0, "dinner")["rule"])
+        finally:
+            self.call("PUT", f"/api/tags/{quick}", {"name": "Schnell", "category": True})
+            self.call("PUT", "/api/settings", {"slot_rules": [None] * 14})
 
     def test_parse_ingredients_and_units(self):
         status, parsed = self.call("POST", "/api/parse-ingredients", {"text": "500 g Mehl\n2 Eier"})

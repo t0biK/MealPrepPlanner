@@ -12,6 +12,7 @@ WARNINGS = ("no_recipe_data", "already_imported", "ai_failed", "ai_disabled", "p
 IMAGE_RE = re.compile(r"^[0-9a-f]{64}\.(jpg|png|webp)$")
 NUTRITION_MAX = {"kcal": 5000, "protein_g": 500, "fat_g": 500, "carbs_g": 500}
 MAX_TAG = 50
+QUICK_MAX_MINUTES, LIGHT_MAX_KCAL, PROTEIN_MIN_SHARE = 30, 500, 0.25  # automatic categories (§6)
 
 
 def sort_key(s):
@@ -174,8 +175,29 @@ def validate_draft(obj, tag_names, images_dir=None):
 # ---- tags ----
 
 def list_tags(conn):
-    rows = conn.execute("SELECT id, name FROM tags").fetchall()
-    return sorted(({"id": r["id"], "name": r["name"]} for r in rows), key=lambda t: sort_key(t["name"]))
+    rows = conn.execute("SELECT id, name, category FROM tags").fetchall()
+    return sorted(({"id": r["id"], "name": r["name"], "category": bool(r["category"])} for r in rows),
+                  key=lambda t: sort_key(t["name"]))
+
+
+def auto_categories(draft):
+    """Names of the categories that follow from a draft's time and nutrition (§6); missing values give no tick."""
+    n = draft.get("nutrition") or {}
+    minutes, kcal, protein = draft.get("total_minutes"), n.get("kcal"), n.get("protein_g")
+    out = set()
+    if minutes and minutes <= QUICK_MAX_MINUTES:
+        out.add("Schnell")
+    if kcal and kcal <= LIGHT_MAX_KCAL:
+        out.add("Leicht")
+    if kcal and protein is not None and protein * 4 >= PROTEIN_MIN_SHARE * kcal:
+        out.add("Proteinreich")
+    return out
+
+
+def suggested_tags(draft, tag_names):
+    """The existing tags (as stored) of the draft's automatic categories, in tag order."""
+    auto = {c.casefold() for c in auto_categories(draft)}
+    return [n for n in tag_names if n.casefold() in auto]
 
 
 def _tag_name(name):
@@ -191,18 +213,23 @@ def create_tag(conn, name):
         if conn.execute("SELECT 1 FROM tags WHERE name = ?", (name,)).fetchone():
             raise db.InvalidField("name")
         tag_id = conn.execute("INSERT INTO tags (name) VALUES (?)", (name,)).lastrowid
-    return {"id": tag_id, "name": name}
+    return {"id": tag_id, "name": name, "category": False}
 
 
-def rename_tag(conn, tag_id, name):
-    """Returns the tag, or None if it does not exist."""
+def update_tag(conn, tag_id, name, category):
+    """Rename a tag and set whether it is a category. Returns the tag, or None if it does not exist.
+    A tag that stops being a category is no slot rule any more."""
     name = _tag_name(name)
+    if not isinstance(category, bool):
+        raise db.InvalidField("category")
     with conn:
         if conn.execute("SELECT 1 FROM tags WHERE name = ? AND id != ?", (name, tag_id)).fetchone():
             raise db.InvalidField("name")
-        if conn.execute("UPDATE tags SET name = ? WHERE id = ?", (name, tag_id)).rowcount == 0:
+        if conn.execute("UPDATE tags SET name = ?, category = ? WHERE id = ?", (name, int(category), tag_id)).rowcount == 0:
             return None
-    return {"id": tag_id, "name": name}
+        if not category:
+            conn.execute("UPDATE plan_slots SET rule_tag_id = NULL WHERE rule_tag_id = ?", (tag_id,))
+    return {"id": tag_id, "name": name, "category": category}
 
 
 def delete_tag(conn, tag_id):

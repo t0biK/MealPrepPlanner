@@ -468,6 +468,7 @@ def build_draft(job, conn, data_dir):
                         **base, "title": (page["og_title"] or page["title"] or host)[:200],
                         "warnings": warnings + ["no_recipe_data"] + why}, tag_names)
 
+    draft["tags"] += [n for n in recipes.suggested_tags(draft, tag_names) if n not in draft["tags"]][:15 - len(draft["tags"])]
     if draft.get("image_url") and not draft.get("image"):
         name = download_image(draft["image_url"], data_dir)
         if name:

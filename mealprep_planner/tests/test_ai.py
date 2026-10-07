@@ -84,8 +84,9 @@ class ValidateTest(unittest.TestCase):
     def test_tag_limits(self):
         patch, dropped = self.v(tags=["Gibtsnicht", 5, "Nudeln", "NUDELN", None])
         self.assertEqual((patch["tags"], dropped), (["Nudeln"], ["tags.0", "tags.1", "tags.4"]))
-        many = ["Nudeln", "Italienisch", "Schnell", "Suppe", "Vegetarisch", "Fleisch", "Fisch", "Reis"]
-        self.assertEqual(len(self.v(tags=many)[0]["tags"]), ai.MAX_TAGS)
+        many = ["Nudeln", "Italienisch", "Schnell", "Suppe", "Vegetarisch", "Fleisch", "Fisch", "Reis", "Salat"]
+        kept = ai.validate_ai_output({**SAMPLE, "tags": many}, TAGS + ["Salat"])[0]["tags"]
+        self.assertEqual((ai.MAX_TAGS, kept), (8, many[:8]))  # up to 8 tags are kept (M13: categories on top of the topic tags)
         self.assertEqual(self.v(tags="Nudeln")[0]["tags"], [])
 
     def test_ingredient_limits(self):
@@ -223,6 +224,9 @@ class EnrichTest(unittest.TestCase):
         self.assertNotIn("Zutat0500", prompt)
         for tag in TAGS:
             self.assertIn(tag, prompt)
+        for category in ("Meal Prep", "Sonntagsessen", "Lunchbox", "Ofengericht", "Gäste"):  # M13: the AI judges these from the recipe
+            self.assertIn(category, prompt)
+        self.assertIn("höchstens 8 passende Tags", prompt)
         # the draft content is part of the prompt
         for part in ("Alt", "Portionen: 4", "Salz und Pfeffer", "1. Kochen.", "keine"):
             self.assertIn(part, prompt)

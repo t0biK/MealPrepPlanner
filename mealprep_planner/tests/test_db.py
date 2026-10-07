@@ -36,7 +36,7 @@ class DbTest(unittest.TestCase):
     def test_settings_defaults(self):
         self.assertEqual(db.get_settings(self.conn), {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2,
                                                       "inbox_entity": None, "slot_pattern": [True] * 14, "repeat_window_days": 14,
-                                                      "new_per_week": 2})
+                                                      "new_per_week": 2, "slot_rules": [None] * 14})
 
     def test_invalid_values_rejected(self):
         for patch, field in [
@@ -121,6 +121,50 @@ class DbTest(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM slot_eaters").fetchone()[0], 2)
             finally:
                 conn.close()
+
+    def test_migration_9_on_an_existing_db(self):
+        categories = {"Schnell", "Meal Prep", "Sonntagsessen", "Leicht", "Proteinreich", "Lunchbox", "Ofengericht", "Gäste"}
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.connect(tmp)
+            try:
+                for n, script in enumerate(db.MIGRATIONS[:8], start=1):  # the database as shipped with M12
+                    conn.executescript(f"BEGIN; {script} PRAGMA user_version = {n}; COMMIT;")
+                with conn:
+                    conn.execute("INSERT INTO tags (name) VALUES ('MEAL PREP')")  # a hand-made tag, other case
+                    conn.execute("INSERT INTO plans (week, status) VALUES ('2026-W41', 'draft')")
+                    conn.execute("INSERT INTO plan_slots (week, day, meal, active) VALUES ('2026-W41', 0, 'lunch', 1)")
+                db.migrate(conn)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], len(db.MIGRATIONS))
+                names = [r["name"] for r in conn.execute("SELECT name FROM tags")]
+                self.assertEqual(len(names), 31)  # 25 defaults + 5 new ('Meal Prep' already existed) + the hand-made one
+                self.assertEqual(len({n.casefold() for n in names}), 31)
+                flagged = {r["name"] for r in conn.execute("SELECT name FROM tags WHERE category = 1")}
+                self.assertEqual({n.casefold() for n in flagged}, {c.casefold() for c in categories})
+                self.assertEqual(len(flagged), 8)
+                self.assertIn("MEAL PREP", names)  # kept as it was
+                tag_id = conn.execute("SELECT id FROM tags WHERE name = 'Schnell'").fetchone()[0]
+                conn.execute("UPDATE plan_slots SET rule_tag_id = ?", (tag_id,))
+                conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))  # ON DELETE SET NULL
+                self.assertIsNone(conn.execute("SELECT rule_tag_id FROM plan_slots").fetchone()[0])
+            finally:
+                conn.close()
+
+    def test_slot_rules_setting(self):
+        ids = {r["name"]: r["id"] for r in self.conn.execute("SELECT id, name FROM tags")}
+        rules = [ids["Schnell"] if i in (1, 3) else ids["Leicht"] if i == 5 else None for i in range(14)]
+        self.assertEqual(db.set_settings(self.conn, {"slot_rules": rules})["slot_rules"], rules)
+        self.assertEqual(db.set_settings(self.conn, {"slot_rules": [None] * 14})["slot_rules"], [None] * 14)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM settings WHERE key = 'slot_rules'").fetchone()[0], 0)  # default: not stored
+        for bad in ([None] * 13, [None] * 15, [ids["Nudeln"]] + [None] * 13, [99999] + [None] * 13, [True] + [None] * 13,
+                    [str(ids["Schnell"])] + [None] * 13, [float(ids["Schnell"])] + [None] * 13, "x", None):
+            with self.assertRaises(db.InvalidField, msg=bad) as cm:
+                db.set_settings(self.conn, {"slot_rules": bad})
+            self.assertEqual(cm.exception.field, "slot_rules")
+        db.set_settings(self.conn, {"slot_rules": rules})
+        self.conn.execute("DELETE FROM tags WHERE name = 'Schnell'")  # a deleted tag reads as no rule
+        self.assertEqual(db.get_settings(self.conn)["slot_rules"], [ids["Leicht"] if i == 5 else None for i in range(14)])
+        db.get_settings(self.conn)["slot_rules"][0] = 1  # defaults are not shared between callers
+        self.assertEqual(db.get_settings(self.conn)["slot_rules"][0], None)
 
     def test_household_validation(self):
         db.upsert_user(self.conn, {"id": "u1", "name": "n", "display_name": "B"})

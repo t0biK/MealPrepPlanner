@@ -238,5 +238,11 @@
   "plan.incl_canteen": "incl. canteen",
   "plan.fit_poor": "does not fit your targets",
   "today.my_portion": "Your portion: {n}",
-  "today.canteen": "Canteen"
+  "today.canteen": "Canteen",
+  "recipes.all_categories": "All categories",
+  "settings.category": "Category",
+  "settings.slot_rules": "Category per meal",
+  "settings.slot_rules_hint": "Optional: the meal prefers recipes of this category, e.g. Mon–Fri dinner = Schnell. If there is none, any recipe is used.",
+  "plan.rule": "Category",
+  "plan.rule_unmet": "Category not met"
 }

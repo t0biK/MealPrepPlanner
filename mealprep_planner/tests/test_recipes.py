@@ -180,7 +180,7 @@ class StoreTest(unittest.TestCase):
         return recipes.create_recipe(self.conn, draft, "u")
 
     def test_default_tags(self):
-        self.assertEqual(len(self.tags), 25)
+        self.assertEqual(len(self.tags), 31)  # the 25 defaults + the 6 categories added by migration 9
         self.assertEqual(self.tags, sorted(self.tags, key=recipes.sort_key))
 
     def test_create_get_roundtrip(self):
@@ -242,11 +242,53 @@ class StoreTest(unittest.TestCase):
         for bad in ("grillen", "", "  ", "x" * 51, None):
             with self.assertRaises(db.InvalidField):
                 recipes.create_tag(self.conn, bad)
-        self.assertEqual(recipes.rename_tag(self.conn, tag["id"], "BBQ")["name"], "BBQ")
-        self.assertEqual(recipes.rename_tag(self.conn, tag["id"], "bbq")["name"], "bbq")  # same tag, new case
+        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "BBQ", False)["name"], "BBQ")
+        self.assertEqual(recipes.update_tag(self.conn, tag["id"], "bbq", False)["name"], "bbq")  # same tag, new case
         with self.assertRaises(db.InvalidField):
-            recipes.rename_tag(self.conn, tag["id"], "Fleisch")
-        self.assertIsNone(recipes.rename_tag(self.conn, 9999, "Foo"))
+            recipes.update_tag(self.conn, tag["id"], "Fleisch", False)
+        self.assertIsNone(recipes.update_tag(self.conn, 9999, "Foo", False))
+
+    def test_tag_category_round_trip(self):
+        tags = {t["name"]: t for t in recipes.list_tags(self.conn)}
+        self.assertEqual(sorted(n for n, t in tags.items() if t["category"]),
+                         sorted(["Schnell", "Meal Prep", "Sonntagsessen", "Leicht", "Proteinreich", "Lunchbox", "Ofengericht", "Gäste"]))
+        self.assertFalse(tags["Nudeln"]["category"])
+        nudeln = tags["Nudeln"]["id"]
+        self.assertEqual(recipes.update_tag(self.conn, nudeln, "Nudeln", True), {"id": nudeln, "name": "Nudeln", "category": True})
+        self.assertTrue(next(t for t in recipes.list_tags(self.conn) if t["id"] == nudeln)["category"])
+        self.assertFalse(recipes.update_tag(self.conn, nudeln, "Nudeln", False)["category"])
+        for bad in (1, 0, None, "yes"):
+            with self.assertRaises(db.InvalidField) as cm:
+                recipes.update_tag(self.conn, nudeln, "Nudeln", bad)
+            self.assertEqual(cm.exception.field, "category")
+
+    def test_a_tag_that_stops_being_a_category_is_no_slot_rule(self):
+        tag_id = next(t["id"] for t in recipes.list_tags(self.conn) if t["name"] == "Lunchbox")
+        self.conn.execute("INSERT INTO plans (week, status) VALUES ('2026-W41', 'draft')")
+        self.conn.execute("INSERT INTO plan_slots (week, day, meal, active, rule_tag_id) VALUES ('2026-W41', 0, 'lunch', 1, ?)", (tag_id,))
+        recipes.update_tag(self.conn, tag_id, "Lunchbox", True)
+        self.assertEqual(self.conn.execute("SELECT rule_tag_id FROM plan_slots").fetchone()[0], tag_id)
+        recipes.update_tag(self.conn, tag_id, "Lunchbox", False)
+        self.assertIsNone(self.conn.execute("SELECT rule_tag_id FROM plan_slots").fetchone()[0])
+
+    def test_auto_categories_at_the_boundaries(self):
+        auto = lambda minutes=None, **n: recipes.auto_categories({"total_minutes": minutes, "nutrition": {"source": "page", **n} if n else None})
+        self.assertEqual((auto(30), auto(31), auto(1), auto(None)), ({"Schnell"}, set(), {"Schnell"}, set()))
+        self.assertEqual((auto(kcal=500), auto(kcal=501)), ({"Leicht"}, set()))
+        self.assertEqual(auto(kcal=400, protein_g=25), {"Leicht", "Proteinreich"})  # 100 kcal of 400 = exactly 25 %
+        self.assertEqual(auto(kcal=400, protein_g=24.9), {"Leicht"})
+        self.assertEqual(auto(kcal=800, protein_g=50), {"Proteinreich"})
+        self.assertEqual(auto(protein_g=50), set())  # no kcal: no share
+        self.assertEqual(auto(kcal=400), {"Leicht"})  # no protein: no Proteinreich
+        self.assertEqual(auto(20, kcal=300, protein_g=30), {"Schnell", "Leicht", "Proteinreich"})
+        self.assertEqual(recipes.auto_categories({}), set())
+        self.assertEqual(recipes.auto_categories({"total_minutes": 20, "nutrition": {"kcal": None, "protein_g": None, "source": "ai"}}), {"Schnell"})
+
+    def test_suggested_tags_are_existing_tags_only(self):
+        draft = {"total_minutes": 10, "nutrition": {"kcal": 300, "protein_g": 30, "source": "ai"}}
+        self.assertEqual(recipes.suggested_tags(draft, self.tags), ["Leicht", "Proteinreich", "Schnell"])
+        self.assertEqual(recipes.suggested_tags(draft, ["schnell", "Nudeln"]), ["schnell"])  # renamed in case: still found
+        self.assertEqual(recipes.suggested_tags(draft, ["Nudeln"]), [])  # deleted tags are not brought back
 
     def test_known_names_distinct_and_sorted(self):
         self.make(ingredients=[{"name": "zucker"}, {"name": "Äpfel"}, {"name": "Mehl"}])

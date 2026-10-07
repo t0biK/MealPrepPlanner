@@ -1004,7 +1004,7 @@ Goal: nothing reaches Bring! unless a person ticks it; Chefkoch-style Bring! imp
 - [ ] With "Mo–Fr Abend = Schnell" in the pattern, those slots get Schnell recipes; without a matching recipe the slot is filled anyway and says so (manual).
 - [ ] An imported recipe with ≤ 30 min arrives with "Schnell" ticked; the AI suggests sensible categories (manual).
 - [ ] Recipes can be filtered by category (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ### M14 – Leftovers ("Reste von …")
 

@@ -155,10 +155,18 @@ MIGRATIONS = [
       PRIMARY KEY (week, day, user_id)
     );
     """,
+    """
+    ALTER TABLE tags ADD COLUMN category INTEGER NOT NULL DEFAULT 0;
+    INSERT OR IGNORE INTO tags (name) VALUES
+      ('Meal Prep'), ('Sonntagsessen'), ('Proteinreich'), ('Lunchbox'), ('Ofengericht'), ('Gäste');
+    UPDATE tags SET category = 1 WHERE name IN
+      ('Schnell', 'Meal Prep', 'Sonntagsessen', 'Leicht', 'Proteinreich', 'Lunchbox', 'Ofengericht', 'Gäste');
+    ALTER TABLE plan_slots ADD COLUMN rule_tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL;
+    """,
 ]
 
 DEFAULTS = {"bring_entity": None, "ai_enabled": True, "ai_entity": None, "default_portions": 2, "inbox_entity": None,
-            "slot_pattern": [True] * 14, "repeat_window_days": 14, "new_per_week": 2}
+            "slot_pattern": [True] * 14, "repeat_window_days": 14, "new_per_week": 2, "slot_rules": [None] * 14}
 INT_RANGES = {"default_portions": (1, 12), "repeat_window_days": (0, 60), "new_per_week": (0, 14)}
 HOUSEHOLD_INTS = {"kcal_target": (300, 5000), "protein_target_g": (10, 400), "canteen_kcal": (0, 2000)}  # the targets may be null
 ENTITY_DOMAIN = {"bring_entity": "todo", "ai_entity": "ai_task", "inbox_entity": "todo"}
@@ -195,10 +203,16 @@ def get_settings(conn):
     for row in conn.execute("SELECT key, value FROM settings"):
         if row["key"] in settings:
             settings[row["key"]] = json.loads(row["value"])
+    categories = category_ids(conn)
+    settings["slot_rules"] = [v if v in categories else None for v in settings["slot_rules"]]  # a deleted tag reads as none
     return settings
 
 
-def _validate(key, value):
+def category_ids(conn):
+    return {r["id"] for r in conn.execute("SELECT id FROM tags WHERE category = 1")}
+
+
+def _validate(conn, key, value):
     if key == "ai_enabled":
         if not isinstance(value, bool):
             raise InvalidField(key)
@@ -207,6 +221,10 @@ def _validate(key, value):
             raise InvalidField(key)
     elif key == "slot_pattern":
         if not isinstance(value, list) or len(value) != 14 or not all(isinstance(v, bool) for v in value):
+            raise InvalidField(key)
+    elif key == "slot_rules":
+        categories = category_ids(conn)
+        if not isinstance(value, list) or len(value) != 14 or not all(v is None or (_is_int(v, 1, 2**63) and v in categories) for v in value):
             raise InvalidField(key)
     elif key in ENTITY_DOMAIN:
         if value is None:
@@ -226,7 +244,7 @@ def _validate(key, value):
 def set_settings(conn, patch):
     """Validate the whole patch first, then store it; defaults live in code, so only changes are stored."""
     for key, value in patch.items():
-        _validate(key, value)
+        _validate(conn, key, value)
     merged = {**get_settings(conn), **patch}
     if merged["inbox_entity"] is not None and merged["inbox_entity"] == merged["bring_entity"]:
         raise InvalidField("inbox_entity" if "inbox_entity" in patch else "bring_entity")

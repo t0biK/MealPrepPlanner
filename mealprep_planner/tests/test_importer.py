@@ -321,6 +321,14 @@ class BuildDraftTest(unittest.TestCase):
         self.assertEqual(draft["warnings"], ["already_imported", "ai_disabled", "image_failed"])
         self.assertEqual(draft["source_url"], "https://example.com/final")
 
+    def test_automatic_categories_are_pre_ticked(self):
+        base = {k: v for k, v in RECIPE.items() if k not in ("keywords", "recipeCategory", "recipeCuisine", "nutrition")}
+        draft = self.build(ld_page({**base, "totalTime": "PT20M", "nutrition": {"calories": "400 kcal", "proteinContent": "25 g"}}))
+        self.assertEqual(sorted(draft["tags"]), ["Leicht", "Proteinreich", "Schnell"])
+        draft = self.build(ld_page({**base, "totalTime": "PT45M", "nutrition": {"calories": "800 kcal", "proteinContent": "20 g"}}))
+        self.assertEqual(draft["tags"], [])
+        self.assertEqual(self.build(ld_page({**base, "keywords": "nudeln, Schnell", "totalTime": "PT20M"}))["tags"], ["Nudeln", "Schnell"])  # no duplicate
+
     def test_default_portions_setting_is_used(self):
         db.set_settings(self.conn, {"default_portions": 5})
         recipe = {k: v for k, v in RECIPE.items() if k != "recipeYield"}
@@ -468,7 +476,7 @@ class BuildDraftAiTest(unittest.TestCase):
             d = self.build({"url": "https://www.tiktok.com/@koch/video/1"}, self.tiktok_pages())
         self.assertEqual((d["title"], d["source_kind"], d["source_url"]),
                          ("Spaghetti Pomodoro", "tiktok", "https://www.tiktok.com/@koch/video/1"))
-        self.assertEqual((d["image"], d["image_url"], d["tags"]), (self.IMAGE, "https://cdn.example.com/t.jpg", ["Nudeln"]))
+        self.assertEqual((d["image"], d["image_url"], d["tags"]), (self.IMAGE, "https://cdn.example.com/t.jpg", ["Nudeln", "Schnell"]))  # Schnell: <= 30 min
         self.assertEqual(d["nutrition"]["source"], "ai")
         self.assertEqual(d["warnings"], [])
         self.assertIn("1 Dose Tomaten", self.calls[0])  # the caption is what the AI reads

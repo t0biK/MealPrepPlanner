@@ -238,5 +238,11 @@
   "plan.incl_canteen": "inkl. Kantine",
   "plan.fit_poor": "passt nicht zu euren Zielen",
   "today.my_portion": "Deine Portion: {n}",
-  "today.canteen": "Kantine"
+  "today.canteen": "Kantine",
+  "recipes.all_categories": "Alle Kategorien",
+  "settings.category": "Kategorie",
+  "settings.slot_rules": "Kategorie pro Mahlzeit",
+  "settings.slot_rules_hint": "Optional: Die Mahlzeit bekommt bevorzugt Rezepte dieser Kategorie, z. B. Mo–Fr Abend = Schnell. Gibt es keins, wird ein beliebiges Rezept genommen.",
+  "plan.rule": "Kategorie",
+  "plan.rule_unmet": "Kategorie nicht erfüllt"
 }
