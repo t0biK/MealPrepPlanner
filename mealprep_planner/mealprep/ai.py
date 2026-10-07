@@ -66,6 +66,10 @@ def _text_prompt(text, known_names, tag_names):
         "Erstelle aus dem folgenden Text (Videobeschreibung, eingefügtes Rezept oder Webseitentext) ein Rezept. "
         "Gib auch Titel, Portionen (servings), Gesamtzeit in Minuten (total_minutes) und die Zubereitungsschritte (steps) an; "
         "fehlende Angaben null bzw. leere Liste. Fehlt ein Titel, leite einen kurzen aus dem Text ab.\n"
+        "Nach der Beschreibung können Abschnitte folgen: \"Videobeschreibung:\" ist die vollständige Beschreibung des "
+        "Autors und zählt wie die Beschreibung selbst. \"Transkript:\" ist automatisch erkannte Sprache und kann Fehler "
+        "enthalten. Beschreibung und Videobeschreibung haben Vorrang; das Transkript ergänzt nur fehlende Zutaten und "
+        "Zubereitungsschritte.\n"
         + _rules(known_names, tag_names) + "\nText:\n" + text
     )
 

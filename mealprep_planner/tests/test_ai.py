@@ -251,6 +251,13 @@ class FromTextTest(unittest.TestCase):
         self.assertEqual(d["nutrition"]["source"], "ai")
         self.assertIn("200 g Spaghetti mit Sauce", call.call_args.args[2]["instructions"])
 
+    def test_prompt_explains_the_video_sections(self):
+        _, call = self.from_text("Caption\n\nTranskript:\nerst Zwiebeln")
+        prompt = call.call_args.args[2]["instructions"]
+        for part in ("\"Videobeschreibung:\"", "\"Transkript:\"", "Fehler", "Vorrang", "ergänzt nur fehlende Zutaten"):
+            self.assertIn(part, prompt)
+        self.assertTrue(prompt.endswith("Text:\nCaption\n\nTranskript:\nerst Zwiebeln"))
+
     def test_servings_default_when_ai_has_none(self):
         (d, _), _ = self.from_text(servings=None)
         self.assertEqual(d["servings"], 2)

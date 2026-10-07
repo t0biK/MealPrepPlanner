@@ -23,6 +23,7 @@ MAX_HTML = 3 * 1024 * 1024
 MAX_IMAGE = 2 * 1024 * 1024
 MAX_OEMBED = 256 * 1024
 MAX_PAGE_TEXT = 20000
+MAX_VIDEO_TEXT = 5000
 
 
 class FetchError(Exception):
@@ -352,6 +353,44 @@ def oembed(url, kind):
     }
 
 
+def _json_after(page_html, key):
+    """The JSON value after the first `"key":` in a page, or None."""
+    i = page_html.find(f'"{key}":')
+    if i < 0:
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(page_html, i + len(key) + 3)[0]
+    except (ValueError, RecursionError):
+        return None
+
+
+def tiktok_transcript(page_html):
+    """Spoken text of a TikTok video page (WebVTT subtitle track, the original rather than a machine translation); "" on any problem."""
+    tracks = _json_after(page_html, "subtitleInfos")
+    tracks = [t for t in tracks if isinstance(t, dict) and t.get("Format") == "webvtt" and recipes.http_url(t.get("Url"))] \
+        if isinstance(tracks, list) else []
+    if not tracks:
+        return ""
+    track = next((t for t in tracks if t.get("Source") != "MT"), tracks[0])
+    try:
+        _, content_type, body = fetch(track["Url"], MAX_OEMBED, "text/vtt,text/plain")
+    except FetchError:
+        return ""
+    cues = [_clean(line) for line in decode(body, content_type).splitlines()
+            if "-->" not in line and not line.startswith("WEBVTT") and not line.strip().isdigit()]
+    return " ".join(c for c in cues if c)[:MAX_VIDEO_TEXT]
+
+
+def youtube_description(page_html):
+    """Full description of a YouTube watch page, line structure kept; "" on any problem."""
+    v = _json_after(page_html, "shortDescription")
+    return _lines(v)[:MAX_VIDEO_TEXT] if isinstance(v, str) else ""
+
+
+# kind -> (heading the AI sees, fn(page_html) -> extra text); a further source is one function + one entry (M17)
+VIDEO_PAGE_TEXT = {"tiktok": ("Transkript:", tiktok_transcript), "youtube": ("Videobeschreibung:", youtube_description)}
+
+
 class _TextExtractor(HTMLParser):
     SKIP = ("script", "style", "noscript")
 
@@ -444,8 +483,18 @@ def build_draft(job, conn, data_dir):
         elif kind in ("tiktok", "youtube"):
             info = oembed(final_url, kind)
             base["image_url"] = info["thumbnail"]
-            if info["caption"]:
-                draft = from_text(info["caption"], base, _caption_fields(info["caption"]))
+            ai_text = info["caption"]
+            if entity and kind in VIDEO_PAGE_TEXT:  # extra text from the public video page; any failure means caption only
+                heading, extract_text = VIDEO_PAGE_TEXT[kind]
+                try:
+                    page = fetched or fetch(final_url, MAX_HTML, "text/html,application/xhtml+xml")  # a short link's page is reused
+                    extra = extract_text(decode(page[2], page[1]))
+                except FetchError:
+                    extra = ""
+                if extra:
+                    ai_text = f"{ai_text}\n\n{heading}\n{extra}".strip()
+            if ai_text:
+                draft = from_text(ai_text, base, _caption_fields(info["caption"]) if info["caption"] else {"title": host[:200]})
             else:
                 draft, _ = recipes.validate_draft({**base, "title": host[:200], "warnings": warnings + ["paste_caption"]}, tag_names)
         else:

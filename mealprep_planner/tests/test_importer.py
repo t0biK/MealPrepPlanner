@@ -401,6 +401,69 @@ class PageTextTest(unittest.TestCase):
         self.assertEqual(importer.page_text(""), "")
 
 
+def subtitle_page(tracks):
+    """A TikTok-like page; like the real one it escapes "/" in the JSON as \\u002F."""
+    return '<script>{"video":{"subtitleInfos":' + json.dumps(tracks).replace("/", "\\u002F") + "}}</script>"
+
+
+def track(source, name, **kw):
+    return {"LanguageCodeName": "x", "Url": f"https://cdn.example.com/{name}.vtt", "Format": "webvtt", "Source": source, **kw}
+
+
+class TikTokTranscriptTest(unittest.TestCase):
+    VTT = ("WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.647\nHallo   zusammen,\n\n"
+           "2\n00:00:01.647 --> 00:00:03.000\nheute <c.yellow>gibt's</c> Pasta &amp; mehr.\n\n3\n\n00:00:03.000 --> 00:00:04.000\nGuten Appetit\n")
+
+    def transcript(self, page, body=None, error=None):
+        with mock.patch.object(importer, "fetch", side_effect=error, return_value=("u", "text/vtt", (body or self.VTT).encode())) as fetch:
+            return importer.tiktok_transcript(page), fetch
+
+    def test_cues_become_plain_text(self):
+        text, fetch = self.transcript(subtitle_page([track("ASR", "asr")]))
+        self.assertEqual(text, "Hallo zusammen, heute gibt's Pasta & mehr. Guten Appetit")
+        self.assertEqual(fetch.call_args.args[:2], ("https://cdn.example.com/asr.vtt", 256 * 1024))  # "\/" decoded, size capped
+
+    def test_original_track_beats_the_machine_translation(self):
+        _, fetch = self.transcript(subtitle_page([track("MT", "mt"), track("ASR", "asr")]))
+        self.assertEqual(fetch.call_args.args[0], "https://cdn.example.com/asr.vtt")
+        _, fetch = self.transcript(subtitle_page([track("MT", "mt1"), track("MT", "mt2")]))  # only translations: the first
+        self.assertEqual(fetch.call_args.args[0], "https://cdn.example.com/mt1.vtt")
+
+    def test_unusable_tracks_are_skipped(self):
+        tracks = [track("ASR", "srt", Format="srt"), track("ASR", "js", Url="javascript:alert(1)"), "x", None, track("ASR", "ok")]
+        _, fetch = self.transcript(subtitle_page(tracks))
+        self.assertEqual(fetch.call_args.args[0], "https://cdn.example.com/ok.vtt")
+
+    def test_no_usable_track_means_no_fetch(self):
+        for page in ("<html></html>", "", '{"subtitleInfos":[', '{"subtitleInfos":{"a":1}}', '{"subtitleInfos":null}',
+                     '{"subtitleInfos": []}', subtitle_page([]), subtitle_page([track("ASR", "a", Format="srt")])):
+            text, fetch = self.transcript(page)
+            self.assertEqual(text, "", page)
+            fetch.assert_not_called()
+
+    def test_fetch_failure_gives_nothing(self):
+        for code in ("fetch_failed", "fetch_blocked", "fetch_too_large"):
+            self.assertEqual(self.transcript(subtitle_page([track("ASR", "a")]), error=importer.FetchError(code))[0], "")
+
+    def test_limit(self):
+        text, _ = self.transcript(subtitle_page([track("ASR", "a")]), body="WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n" + "wort " * 3000)
+        self.assertEqual(len(text), 5000)
+
+
+class YoutubeDescriptionTest(unittest.TestCase):
+    def test_escapes_are_decoded_and_lines_kept(self):
+        page = '<script>{"videoDetails":{"title":"t","shortDescription":' + json.dumps('Suppe  "Oma"\n\n200 g Mehl\n  2 Eier') + ',"x":1}}</script>'
+        self.assertEqual(importer.youtube_description(page), 'Suppe "Oma"\n200 g Mehl\n2 Eier')
+
+    def test_missing_or_malformed_gives_nothing(self):
+        for page in ("", "<html></html>", '{"shortDescription":', '{"shortDescription":"offen', '{"shortDescription":5}',
+                     '{"shortDescription":null}', '{"shortDescription":["a"]}'):
+            self.assertEqual(importer.youtube_description(page), "", page)
+
+    def test_limit(self):
+        self.assertEqual(len(importer.youtube_description('{"shortDescription":' + json.dumps("zeile\n" * 3000) + "}")), 5000)
+
+
 class CaptionFieldsTest(unittest.TestCase):
     def test_lines_with_an_amount_are_ingredients(self):
         text = "Schnelle Pasta 🍝\n\n200 g Nudeln\n- 2 Zwiebeln\n1. Zwiebeln schneiden\nSalz\n½ TL Pfeffer"
@@ -459,6 +522,8 @@ class BuildDraftAiTest(unittest.TestCase):
             self.fetched.append(url)
             for key, value in (pages or {}).items():
                 if url.startswith(key):
+                    if isinstance(value, Exception):
+                        raise value
                     return value
             raise AssertionError("unexpected fetch " + url)
 
@@ -467,9 +532,22 @@ class BuildDraftAiTest(unittest.TestCase):
             self.download = dl
             return importer.build_draft(job, self.conn, self.tmp.name)
 
-    def tiktok_pages(self, oembed=None, final="https://www.tiktok.com/@koch/video/1"):
+    VIDEO = "https://www.tiktok.com/@koch/video/1"
+    VTT = "WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\nZuerst die <c>Zwiebeln</c> anbraten.\n\n2\n00:00:02.000 --> 00:00:04.000\nDann Nudeln kochen.\n"
+
+    def tiktok_pages(self, oembed=None, final=VIDEO, video=b"<html></html>"):
+        """oEmbed endpoint plus the video page (also what a short link redirects to); `video` is bytes or an exception."""
+        page = video if isinstance(video, Exception) else (final, "text/html", video)
         return {"https://www.tiktok.com/oembed": (final, "application/json", json.dumps(oembed or self.OEMBED).encode()),
-                "https://vm.tiktok.com/": (final, "text/html", b"<html></html>")}
+                "https://vm.tiktok.com/": page, self.VIDEO: page}
+
+    def transcript_page(self):
+        tracks = [{"Format": "webvtt", "Source": "MT", "Url": "https://cdn.example.com/mt.vtt"},
+                  {"Format": "webvtt", "Source": "ASR", "Url": "https://cdn.example.com/asr.vtt"}]
+        return ('<script>{"video":{"subtitleInfos":' + json.dumps(tracks).replace("/", "\\u002F") + "}}</script>").encode()
+
+    def with_vtt(self, pages):
+        return {**pages, "https://cdn.example.com/asr.vtt": ("u", "text/vtt", self.VTT.encode())}
 
     def test_tiktok_with_ai(self):
         with self.ai_reply(self.AI):
@@ -480,7 +558,8 @@ class BuildDraftAiTest(unittest.TestCase):
         self.assertEqual(d["nutrition"]["source"], "ai")
         self.assertEqual(d["warnings"], [])
         self.assertIn("1 Dose Tomaten", self.calls[0])  # the caption is what the AI reads
-        self.assertEqual(len(self.fetched), 1)  # oEmbed only
+        self.assertEqual(len(self.fetched), 2)  # oEmbed and the video page (no subtitles on it)
+        self.assertTrue(self.calls[0].endswith(self.CAPTION))  # no extra section
 
     def test_tiktok_without_ai_uses_the_caption_lines(self):
         for enabled, entity in ((False, "ai_task.test"), (True, None)):  # switched off / no entity chosen
@@ -490,7 +569,56 @@ class BuildDraftAiTest(unittest.TestCase):
             self.assertEqual((d["title"], d["warnings"]), ("Pasta Pomodoro", ["ai_disabled"]))
             self.assertEqual([i["name"] for i in d["ingredients"]], ["Spaghetti", "Tomaten"])
             self.assertEqual(d["image"], self.IMAGE)
+            self.assertEqual(len(self.fetched), 1)  # oEmbed only, the video page is not read without AI
         self.assertEqual(self.calls, [])
+
+    def test_tiktok_transcript_follows_the_caption(self):
+        pages = self.with_vtt(self.tiktok_pages(video=self.transcript_page()))
+        with self.ai_reply(self.AI):
+            d = self.build({"url": self.VIDEO}, pages)
+        self.assertEqual(d["warnings"], [])
+        self.assertIn(self.CAPTION + "\n\nTranskript:\nZuerst die Zwiebeln anbraten. Dann Nudeln kochen.", self.calls[0])
+        self.assertEqual(self.fetched[-1], "https://cdn.example.com/asr.vtt")
+
+    def test_youtube_description_follows_the_title(self):
+        info = {"title": "Cremige Suppe", "author_name": "Koch", "thumbnail_url": "https://i.ytimg.com/vi/x/hq.jpg"}
+        watch = '{"videoDetails":{"shortDescription":' + json.dumps("Zutaten:\n500 g Kartoffeln") + ',"x":1}}'
+        pages = {"https://www.youtube.com/oembed": ("u", "application/json", json.dumps(info).encode()),
+                 "https://www.youtube.com/watch": ("u", "text/html", watch.encode())}
+        with self.ai_reply(self.AI):
+            d = self.build({"url": "https://www.youtube.com/watch?v=x"}, pages)
+        self.assertEqual(d["warnings"], [])
+        self.assertIn("Cremige Suppe\n\nVideobeschreibung:\nZutaten:\n500 g Kartoffeln", self.calls[0])
+
+    def test_video_without_caption_but_with_extra_text_gets_an_ai_draft(self):
+        pages = self.with_vtt(self.tiktok_pages({"title": "", "thumbnail_url": "https://cdn.example.com/t.jpg"}, video=self.transcript_page()))
+        with self.ai_reply(self.AI):
+            d = self.build({"url": self.VIDEO}, pages)
+        self.assertEqual((d["title"], d["warnings"]), ("Spaghetti Pomodoro", []))
+        self.assertTrue(self.calls[0].endswith("Text:\nTranskript:\nZuerst die Zwiebeln anbraten. Dann Nudeln kochen."))
+        with self.ai_reply(ha.HAError(None, "ha_unavailable")):  # rule-based fallback: no caption, so the title is the host
+            d = self.build({"url": self.VIDEO}, pages)
+        self.assertEqual((d["title"], d["warnings"], d["ingredients"]), ("www.tiktok.com", ["ai_failed"], []))
+
+    def test_failing_video_page_means_caption_only(self):
+        for video in (importer.FetchError("fetch_failed"), importer.FetchError("fetch_blocked")):
+            self.calls.clear()
+            with self.ai_reply(self.AI):
+                d = self.build({"url": self.VIDEO}, self.tiktok_pages(video=video))
+            self.assertEqual((d["title"], d["warnings"]), ("Spaghetti Pomodoro", []))
+            self.assertTrue(self.calls[0].endswith(self.CAPTION))  # no extra section
+
+    def test_short_link_page_is_fetched_only_once(self):
+        pages = self.with_vtt(self.tiktok_pages(video=self.transcript_page()))
+        with self.ai_reply(self.AI):
+            self.build({"url": "https://vm.tiktok.com/ZMabc/"}, pages)
+        self.assertEqual([u for u in self.fetched if "tiktok.com" in u and "oembed" not in u], ["https://vm.tiktok.com/ZMabc/"])
+        self.assertIn("Transkript:", self.calls[0])
+
+    def test_a_registered_source_reaches_the_ai(self):
+        with mock.patch.dict(importer.VIDEO_PAGE_TEXT, {"tiktok": ("Stub:", lambda page: "extra " + page)}), self.ai_reply(self.AI):
+            self.build({"url": self.VIDEO}, self.tiktok_pages(video=b"seite"))
+        self.assertIn(self.CAPTION + "\n\nStub:\nextra seite", self.calls[0])
 
     def test_ai_failure_keeps_the_rule_based_draft(self):
         for failure in (ha.HAError(None, "ha_unavailable"), "kein JSON", {"title": ""}):

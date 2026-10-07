@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.0
+
+- TikTok: when the caption only lists ingredients, the app now also reads the spoken text of the video, so the cooking steps show up in the draft.
+- YouTube: the full video description is read too, so recipes written there are picked up without pasting anything.
+- With AI switched off, video links work as before.
+
 ## 0.16.1
 
 - MealPrep Planner now shows up in the sidebar for every household member, not only for admins.

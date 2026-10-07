@@ -1176,7 +1176,7 @@ Goal: many video captions list only ingredients (or only a title, on YouTube); t
 - [ ] A TikTok recipe whose caption lists only ingredients and nutrition, with the steps spoken: the draft has steps, and the caption's ingredients and nutrition are unchanged (manual, HA).
 - [ ] A YouTube recipe video with the recipe in its description: the draft has ingredients and steps without pasting anything (manual, HA).
 - [ ] With AI off, TikTok and YouTube imports behave as before (manual).
-- [ ] All tests pass.
+- [x] All tests pass.
 
 ## 10. Testing
 
